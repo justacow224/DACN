@@ -8,11 +8,12 @@
 # ML-KEM-512 constants (AES-128)
 n = 256
 q = 3329
-k = 2
-eta1 = 3
+
+k = 4
+eta1 = 2
 eta2 = 2
-du = 10
-dv = 4
+du = 11
+dv = 5
 
 # Required RBG strength (bits)      128
 # Encapsulation key sizes (bytes)   800

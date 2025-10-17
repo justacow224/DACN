@@ -1,5 +1,5 @@
 from GLOBAL import *
-import hashlib
+from Crypto.Hash import SHAKE256, SHAKE128, SHA3_256, SHA3_512
 
 def PRF(eta: int, s: bytes, b: int) -> bytes:
     """
@@ -35,10 +35,14 @@ def PRF(eta: int, s: bytes, b: int) -> bytes:
 
     # 5. Instantiate SHAKE256, update it with the concatenated data,
     #    and generate the digest of the required length.
-    shake = hashlib.shake_256()
-    shake.update(input_data)
+    # shake = hashlib.shake_256()
+    # shake.update(input_data)
     
-    return shake.digest(output_length_bytes)
+    # return shake.digest(output_length_bytes)
+
+    shake = SHAKE256.new()
+    shake.update(input_data)
+    return shake.read(output_length_bytes)
 
 
 def H(s: bytes) -> bytes:
@@ -51,7 +55,8 @@ def H(s: bytes) -> bytes:
     Returns:
         A 32-byte hash digest.
     """
-    return hashlib.sha3_256(s).digest()
+    # return hashlib.sha3_256(s).digest()
+    return SHA3_256.new(s).digest()
 
 def J(s: bytes) -> bytes:
     """
@@ -65,7 +70,8 @@ def J(s: bytes) -> bytes:
     """
     # The output length is 32 bytes (256 bits)
     output_length_bytes = 32
-    return hashlib.shake_256(s).digest(output_length_bytes)
+    # return hashlib.shake_256(s).digest(output_length_bytes)
+    return SHAKE256.new(s).read(output_length_bytes)
 
 def G(c: bytes) -> tuple[bytes, bytes]:
     """
@@ -79,15 +85,14 @@ def G(c: bytes) -> tuple[bytes, bytes]:
         A tuple containing two 32-byte hash digests (a, b).
     """
     # SHA3-512 produces a 64-byte digest
-    full_digest = hashlib.sha3_512(c).digest()
-    
+    # full_digest = hashlib.sha3_512(c).digest()
+    full_digest = SHA3_512.new(c).digest()
+
     # Split the 64-byte digest into two 32-byte chunks
     a = full_digest[:32]
     b = full_digest[32:]
     
     return (a, b)
-
-import hashlib
 
 class XOF:
     """
@@ -101,7 +106,8 @@ class XOF:
         Initializes the XOF context. This corresponds to XOF.Init().
         """
         # The shake_128 object holds the internal state (ctx)
-        self._ctx = hashlib.shake_128()
+        # self._ctx = hashlib.shake_128()
+        self._ctx = SHAKE128.new()
 
     def Absorb(self, data: bytes):
         """
@@ -111,7 +117,6 @@ class XOF:
         Args:
             data: The input bytes to absorb.
         """
-
         self._ctx.update(data)
 
     def Squeeze(self, num_bytes: int):
@@ -125,5 +130,5 @@ class XOF:
         Returns:
             The generated output as a bytes object.
         """
-        return self._ctx.digest(num_bytes)
+        return self._ctx.read(num_bytes)
 

@@ -118,9 +118,9 @@ def ByteEncode(d: int, F: list[int]) -> bytes:
         a = F[i]
         for j in range(d):
             # Extract the LSB (a mod 2) and place it in the bit array
-            bits[i * d + j] = a & 1
+            bits[i * d + j] = a % 2
             # Integer division by 2 (equivalent to a right shift)
-            a >>= 1
+            a = (a - bits[i * d + j]) // 2
             
     return BitsToBytes(bits)
 

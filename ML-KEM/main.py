@@ -1,8 +1,7 @@
 import ML_KEM
+import hashlib
 from GeneralAlgr import *
 from GLOBAL import *
-
-
 
 # try:
 #     print("## ML-KEM-512 Full Cycle Test ##\n")
@@ -43,7 +42,7 @@ print("## ML-KEM-512 Full Cycle Test ##\n")
 # A potential recipient generates a key pair.
 public_key, private_key = ML_KEM.KeyGen()
 print("1. Recipient generated a public/private key pair.")
-print("Type check:")
+print("Check:")
 print("   -> Public Key Length:", len(public_key))
 print("   -> Private Key Length:", len(private_key))
 # print("Modulus check:")
@@ -56,6 +55,8 @@ print("   -> Private Key Length:", len(private_key))
 # and a ciphertext to send.
 sender_shared_secret, ciphertext = ML_KEM.Encaps(public_key)
 print("2. Sender encapsulated a secret, generating a shared secret and a ciphertext.")
+print("Check:")
+print("   -> Ciphertext Length:", len(ciphertext))
 print(f"   -> Sender's Secret: {sender_shared_secret.hex()}")
 
 # 3. RECIPIENT DECAPSULATES
@@ -69,3 +70,4 @@ print(f"   -> Recipient's Secret: {recipient_shared_secret.hex()}")
 # Both parties should now have the exact same 32-byte secret key.
 assert sender_shared_secret == recipient_shared_secret
 print("\n✅ Success! The sender's and recipient's shared secrets match perfectly.")
+
