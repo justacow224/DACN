@@ -4,6 +4,7 @@ from CryptoFunc import *
 from NTT import *
 from GeneralAlgr import *
 
+
 def KeyGen(d: bytes):
     """
     (Algorithm 13) Generates a public and private key pair for Kyber PKE.
@@ -63,15 +64,16 @@ def KeyGen(d: bytes):
         
         # Add error term: row_result + e_hat_i
         t_hat[i] = [(x + y) % q for x, y in zip(row_result, e_hat[i])]
+
         
     # Step 19: Form the public key ek_PKE
     # Concatenate the byte-encoded polynomials of t_hat
-    ek_PKE_parts = [ByteEncode(12, poly) for poly in t_hat]
+    ek_PKE_parts = [bytes(ByteEncode(12, poly)) for poly in t_hat]
     ek_PKE = b"".join(ek_PKE_parts) + rho
     
     # Step 20: Form the private key dk_PKE
     # Concatenate the byte-encoded polynomials of s
-    dk_PKE_parts = [ByteEncode(12, poly) for poly in s]
+    dk_PKE_parts = [bytes(ByteEncode(12, poly)) for poly in s]
     dk_PKE = b"".join(dk_PKE_parts)
     
     # Step 21: Return key pair
@@ -142,12 +144,12 @@ def Encrypt(ek_PKE: bytes, m: bytes, r: bytes):
     
     # Step 22: Compress and encode u into c₁
     u_compressed = [[compress(du, coeff) for coeff in poly] for poly in u]
-    c1_parts = [ByteEncode(du, poly) for poly in u_compressed]
+    c1_parts = [bytes(ByteEncode(du, poly)) for poly in u_compressed]
     c1 = b"".join(c1_parts)
     
     # Step 23: Compress and encode v' into c₂
     v_prime_compressed = [compress(dv, coeff) for coeff in v_prime]
-    c2 = ByteEncode(dv, v_prime_compressed)
+    c2 = bytes(ByteEncode(dv, v_prime_compressed))
     
     # Step 24: Return ciphertext
     return c1 + c2
@@ -196,7 +198,7 @@ def Decrypt(dk_PKE: bytes, c: bytes):
     
     # Step 7: Compress w to recover message bits, then encode to bytes
     message_bits = [compress(1, coeff) for coeff in w]
-    m = ByteEncode(1, message_bits)
+    m = bytes(ByteEncode(1, message_bits))
     
     # Step 8: Return the message
     return m

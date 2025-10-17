@@ -1,6 +1,7 @@
 from GLOBAL import *
+from numba import jit
 
-
+# @jit(nopython=True)
 # def bit_reverse(n, bits):
 #     """Reverses the bits of an integer."""
 #     rev = 0
@@ -22,9 +23,6 @@ from GLOBAL import *
 # # The values are ζ^(2*BitRev_7(i)+1) mod q
 # GAMMAS = [pow(17, 2 * bit_reverse(i, 7) + 1, q) for i in range(128)]
 
-
-
-
 ZETAS = [
     1, 1729, 2580, 3289, 2642, 630, 1897, 848,
     1062, 1919, 193, 797, 2786, 3260, 569, 1746,
@@ -44,10 +42,6 @@ ZETAS = [
     1722, 1212, 1874, 1029, 2110, 2935, 885, 2154
 ]
 
-
-
-# GAMMAS are used for BaseCaseMultiply (Algorithm 12) inside MultiplyNTTs
-# The values are ζ^(2*BitRev_7(i)+1) mod q
 GAMMAS = [
     17, -17, 2761, -2761, 583, -583, 2649, -2649,
     1637, -1637, 723, -723, 2288, -2288, 1100, -1100,
@@ -69,13 +63,22 @@ GAMMAS = [
 
 
 
+
+# GAMMAS are used for BaseCaseMultiply (Algorithm 12) inside MultiplyNTTs
+# The values are ζ^(2*BitRev_7(i)+1) mod q
+
+
 # Scaling factor for InverseNTT
 F = 3303 # This is 128^-1 mod 3329
+
+
 
 def NTT(f: list[int]) -> list[int]:
     """
     (Algorithm 9) Computes the Number-Theoretic Transform (NTT).
     """
+
+
     f_hat = f[:] # Work on a copy
     k = 0
     
@@ -97,13 +100,13 @@ def NTT(f: list[int]) -> list[int]:
         length //= 2
         
     return f_hat
+
 def invNTT(f_hat: list[int]) -> list[int]:
     """
     (Algorithm 10) Computes the Inverse Number-Theoretic Transform (NTT⁻¹).
     """
     f = f_hat[:] # Work on a copy
     k = 127
-    
     length = 2
     while length <= 128:
         start = 0
@@ -123,10 +126,14 @@ def invNTT(f_hat: list[int]) -> list[int]:
     # Final scaling
     return [(v * F) % q for v in f]
 
+
+
 def MultiplyNTTs(f_hat: list[int], g_hat: list[int]) -> list[int]:
     """
     (Algorithm 11) Computes the product of two NTT representations.
     """
+
+
     h_hat = [0] * 256
     for i in range(128):
         # Unpack coefficients for the i-th component
@@ -137,7 +144,13 @@ def MultiplyNTTs(f_hat: list[int], g_hat: list[int]) -> list[int]:
         gamma = GAMMAS[i]
         
         # Perform the base case multiplication
+        ### NON NUMBA ###
         c0, c1 = BaseCaseMultiply(a0, a1, b0, b1, gamma)
+
+
+        # ### NUMBA ###
+        # c0 = (a0 * b0 + a1 * b1 * gamma) % q
+        # c1 = (a0 * b1 + a1 * b0) % q
         
         # Pack the results back into the output array
         h_hat[2 * i] = c0
@@ -145,6 +158,7 @@ def MultiplyNTTs(f_hat: list[int], g_hat: list[int]) -> list[int]:
         
     return h_hat
 
+@jit(nopython=True, cache=True)
 def BaseCaseMultiply(a0, a1, b0, b1, y):
     """
     (Algorithm 12) Computes the product of two degree-one polynomials.
