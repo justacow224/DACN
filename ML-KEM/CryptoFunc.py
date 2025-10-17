@@ -1,3 +1,4 @@
+from GLOBAL import *
 import hashlib
 
 def PRF(eta: int, s: bytes, b: int) -> bytes:
@@ -5,7 +6,7 @@ def PRF(eta: int, s: bytes, b: int) -> bytes:
     Implements the PRF as defined by SHAKE256(s || b, 8 * 64 * eta).
 
     Args:
-        eta: An integer, must be 2 or 3. It determines the output length.
+        eta: The distribution parameter, must be 2 or 3.
         s: A 32-byte input string.
         b: A 1-byte input, represented as an integer (0-255).
 
@@ -39,7 +40,6 @@ def PRF(eta: int, s: bytes, b: int) -> bytes:
     
     return shake.digest(output_length_bytes)
 
-import hashlib
 
 def H(s: bytes) -> bytes:
     """
@@ -103,7 +103,10 @@ class XOF:
         # The shake_128 object holds the internal state (ctx)
         self._ctx = hashlib.shake_128()
 
-    def absorb(self, data: bytes):
+    def init(self):
+        return self._ctx
+
+    def absorb(self, ctx, data: bytes):
         """
         Absorbs an input byte string into the XOF state.
         This corresponds to XOF.Absorb(ctx, str).
@@ -111,12 +114,12 @@ class XOF:
         Args:
             data: The input bytes to absorb.
         """
-        self._ctx.update(data)
+        return ctx.update(data)
 
-    def squeeze(self, num_bytes: int) -> bytes:
+    def squeeze(self, ctx, num_bytes: int) -> bytes:
         """
         Squeezes a specified number of bytes from the XOF state.
-        This corresponds to XOF.Squeeze(ctx, ℓ).
+        This corresponds to XOF.Squeeze(ctx, l).
 
         Args:
             num_bytes: The number of output bytes to generate.
@@ -124,5 +127,5 @@ class XOF:
         Returns:
             The generated output as a bytes object.
         """
-        return self._ctx.digest(num_bytes)
+        return ctx.digest(num_bytes)
 

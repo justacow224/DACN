@@ -1,4 +1,4 @@
-from GLOBAL import k, n, q
+from GLOBAL import *
 import GeneralAlgr
 import CryptoFunc
 

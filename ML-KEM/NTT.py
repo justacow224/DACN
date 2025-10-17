@@ -1,4 +1,4 @@
-from GLOBAL import k, n, q, c
+from GLOBAL import *
 
 
 def bit_reverse(n, bits):
@@ -14,11 +14,11 @@ def bit_reverse(n, bits):
 # Precomputed tables for zeta values
 # ZETAS are used for NTT (Algorithm 9) and InverseNTT (Algorithm 10)
 # The values are ζ^BitRev_7(i) mod q for i = 0,...,127
-ZETAS = [pow(c, bit_reverse(i, 7), q) for i in range(128)]
+ZETAS = [pow(17, bit_reverse(i, 7), q) for i in range(128)]
 
 # GAMMAS are used for BaseCaseMultiply (Algorithm 12) inside MultiplyNTTs
 # The values are ζ^(2*BitRev_7(i)+1) mod q
-GAMMAS = [pow(c, 2 * bit_reverse(i, 7) + 1, q) for i in range(128)]
+GAMMAS = [pow(17, 2 * bit_reverse(i, 7) + 1, q) for i in range(128)]
 
 # Scaling factor for InverseNTT
 F = 3303 # This is 128^-1 mod 3329
