@@ -1,5 +1,6 @@
 import ML_KEM
-
+from GeneralAlgr import *
+from GLOBAL import *
 
 
 
@@ -42,6 +43,13 @@ print("## ML-KEM-512 Full Cycle Test ##\n")
 # A potential recipient generates a key pair.
 public_key, private_key = ML_KEM.KeyGen()
 print("1. Recipient generated a public/private key pair.")
+print("Type check:")
+print("   -> Public Key Length:", len(public_key))
+print("   -> Private Key Length:", len(private_key))
+# print("Modulus check:")
+# test = ByteEncode(12, ByteDecode(12, public_key[:384*k]))
+# if test == public_key[:384*k]:
+#     print("   -> Public Key encoding/decoding is consistent.")
 
 # 2. SENDER ENCAPSULATES
 # A sender uses the recipient's public key to create a shared secret

@@ -108,8 +108,8 @@ def ByteEncode(d: int, F: list[int]) -> bytes:
     """
     if not (1 <= d <= 12):
         raise ValueError("Parameter d must be between 1 and 12.")
-    if len(F) != 256:
-        raise ValueError("Input array F must have 256 integers.")
+    # if len(F) != 256:
+    #     raise ValueError("Input array F must have 256 integers.")
     
     # Total number of bits will be 256 * d
     bits = [0] * (256 * d)
@@ -130,9 +130,9 @@ def ByteDecode(d: int, B: bytes) -> list[int]:
     """
     if not (1 <= d <= 12):
         raise ValueError("Parameter d must be between 1 and 12.")
-    expected_len = 32 * d
-    if len(B) != expected_len:
-         raise ValueError(f"Input byte array B must have length {expected_len}.")
+    # expected_len = 32 * d
+    # if len(B) != expected_len:
+    #      raise ValueError(f"Input byte array B must have length {expected_len}.")
 
     bits = BytesToBits(B)
     F = [0] * 256

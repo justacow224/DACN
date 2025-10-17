@@ -177,7 +177,9 @@ def Decrypt(dk_PKE: bytes, c: bytes):
     v_prime = [decompress(dv, coeff) for coeff in v_prime_compressed]
     
     # Step 5: Decode the private key s (it's already in NTT form)
-    s_hat = [ByteDecode(12, dk_PKE[i*384:(i+1)*384]) for i in range(k)]
+    s_poly = [ByteDecode(12, dk_PKE[i*384:(i+1)*384]) for i in range(k)]
+
+    s_hat = [NTT(p) for p in s_poly]
     
     # Step 6: Compute w = v' - NTT⁻¹(ŝᵀ ○ NTT(u'))
     u_prime_hat = [NTT(p) for p in u_prime]
