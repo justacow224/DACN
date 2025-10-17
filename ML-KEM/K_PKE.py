@@ -101,10 +101,10 @@ def Encrypt(ek_PKE: bytes, m: bytes, r: bytes):
     t_hat = [ByteDecode(12, t_hat_bytes[i*384:(i+1)*384]) for i in range(k)]
 
     # Step 4-8: Re-generate matrix Â from seed ρ
-    A_hat = [[SampleNTT(rho + j.to_bytes(1,'l') + i.to_bytes(1,'l')) for j in range(k)] for i in range(k)]
+    A_hat = [[SampleNTT(rho + j.to_bytes(1,'little') + i.to_bytes(1,'little')) for j in range(k)] for i in range(k)]
     
     # Step 9-11: Generate ephemeral secret y
-    y = [SamplePolyCBD(eta1, PRF(r, N + i)) for i in range(k)]; N += k
+    y = [SamplePolyCBD(eta1, PRF(eta1, r, N + i)) for i in range(k)]; N += k
     
     # Step 12-14: Generate error vector e₁
     e1 = [SamplePolyCBD(eta2, PRF(eta2, r, N + i)) for i in range(k)]; N += k

@@ -18,15 +18,14 @@ def SampleNTT(B: bytes) -> list[int]:
         raise ValueError("Input byte array B must be 34 bytes long.")
 
     xof = CryptoFunc.XOF()
-    xof.absorb(B)
+    xof.Absorb(B)
     
     a_hat = [0] * 256
     j = 0
     
     while j < 256:
         # Squeeze 3 bytes from the XOF stream
-        C = xof.squeeze(3)
-        
+        C = xof.Squeeze(3)
         # Unpack two 12-bit integers d1, d2 from the 3 bytes
         d1 = C[0] + 256 * (C[1] % 16)
         d2 = (C[1] // 16) + 16 * C[2]

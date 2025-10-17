@@ -28,7 +28,7 @@ def PRF(eta: int, s: bytes, b: int) -> bytes:
     output_length_bytes = 64 * eta
 
     # 3. Convert the integer b to a single byte
-    b_byte = b.to_bytes(1, 'big')
+    b_byte = b.to_bytes(1, 'little')
 
     # 4. Concatenate s and b
     input_data = s + b_byte
@@ -103,10 +103,7 @@ class XOF:
         # The shake_128 object holds the internal state (ctx)
         self._ctx = hashlib.shake_128()
 
-    def init(self):
-        return self._ctx
-
-    def absorb(self, ctx, data: bytes):
+    def Absorb(self, data: bytes):
         """
         Absorbs an input byte string into the XOF state.
         This corresponds to XOF.Absorb(ctx, str).
@@ -114,9 +111,10 @@ class XOF:
         Args:
             data: The input bytes to absorb.
         """
-        return ctx.update(data)
 
-    def squeeze(self, ctx, num_bytes: int) -> bytes:
+        self._ctx.update(data)
+
+    def Squeeze(self, num_bytes: int):
         """
         Squeezes a specified number of bytes from the XOF state.
         This corresponds to XOF.Squeeze(ctx, l).
@@ -127,5 +125,5 @@ class XOF:
         Returns:
             The generated output as a bytes object.
         """
-        return ctx.digest(num_bytes)
+        return self._ctx.digest(num_bytes)
 
