@@ -23,7 +23,7 @@ GAMMAS = [pow(17, 2 * bit_reverse(i, 7) + 1, q) for i in range(128)]
 # Scaling factor for InverseNTT
 F = 3303 # This is 128^-1 mod 3329
 
-def NTT(f):
+def NTT(f: list[int]) -> list[int]:
     """
     (Algorithm 9) Computes the Number-Theoretic Transform (NTT).
     """
@@ -48,7 +48,7 @@ def NTT(f):
         length //= 2
         
     return f_hat
-def invNTT(f_hat):
+def invNTT(f_hat: list[int]) -> list[int]:
     """
     (Algorithm 10) Computes the Inverse Number-Theoretic Transform (NTT⁻¹).
     """
@@ -74,7 +74,7 @@ def invNTT(f_hat):
     # Final scaling
     return [(v * F) % q for v in f]
 
-def MultiplyNTTs(f_hat, g_hat):
+def MultiplyNTTs(f_hat: list[int], g_hat: list[int]) -> list[int]:
     """
     (Algorithm 11) Computes the product of two NTT representations.
     """

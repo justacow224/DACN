@@ -4,7 +4,7 @@ from CryptoFunc import *
 from NTT import *
 from GeneralAlgr import *
 
-def KeyGen(d):
+def KeyGen(d: bytes):
     """
     (Algorithm 13) Generates a public and private key pair for Kyber PKE.
 
@@ -77,7 +77,7 @@ def KeyGen(d):
     # Step 21: Return key pair
     return (ek_PKE, dk_PKE)
 
-def Encrypt(ek_PKE, m, r):
+def Encrypt(ek_PKE: bytes, m: bytes, r: bytes):
     """
     (Algorithm 14) Encrypts a message m using the Kyber PKE public key.
     
@@ -152,7 +152,7 @@ def Encrypt(ek_PKE, m, r):
     # Step 24: Return ciphertext
     return c1 + c2
 
-def Decrypt(dk_PKE, c):
+def Decrypt(dk_PKE: bytes, c: bytes):
     """
     (Algorithm 15) Decrypts a Kyber PKE ciphertext.
     
