@@ -1,5 +1,5 @@
 from GLOBAL import *
-from Crypto.Hash import SHAKE256, SHAKE128, SHA3_256, SHA3_512
+from SHA3 import SHAKE256, SHAKE128, SHA3_256, SHA3_512
 
 def PRF(eta: int, s: bytes, b: int) -> bytes:
     """
@@ -35,14 +35,17 @@ def PRF(eta: int, s: bytes, b: int) -> bytes:
 
     # 5. Instantiate SHAKE256, update it with the concatenated data,
     #    and generate the digest of the required length.
-    # shake = hashlib.shake_256()
-    # shake.update(input_data)
-    
-    # return shake.digest(output_length_bytes)
 
-    shake = SHAKE256.new()
-    shake.update(input_data)
-    return shake.read(output_length_bytes)
+
+    # # LIBRARY SHA3
+    # shake = SHAKE256.new()
+    # shake.update(input_data)
+    # shake_ouput = shake.read(output_length_bytes)
+    # assert local_output == shake_ouput
+
+    # print(type(local_output), type(shake_ouput))
+
+    return SHAKE256.new(input_data).read(output_length_bytes)
 
 
 def H(s: bytes) -> bytes:
@@ -55,7 +58,10 @@ def H(s: bytes) -> bytes:
     Returns:
         A 32-byte hash digest.
     """
-    # return hashlib.sha3_256(s).digest()
+
+    # # LIB SHA3
+    # lib = SHA3_256.new(s).digest()
+    # assert local == lib
     return SHA3_256.new(s).digest()
 
 def J(s: bytes) -> bytes:
@@ -70,7 +76,11 @@ def J(s: bytes) -> bytes:
     """
     # The output length is 32 bytes (256 bits)
     output_length_bytes = 32
-    # return hashlib.shake_256(s).digest(output_length_bytes)
+
+
+    # # LIB SHA3
+    # lib = SHAKE256.new(s).read(output_length_bytes)
+    # assert local == lib
     return SHAKE256.new(s).read(output_length_bytes)
 
 def G(c: bytes) -> tuple[bytes, bytes]:
@@ -85,8 +95,13 @@ def G(c: bytes) -> tuple[bytes, bytes]:
         A tuple containing two 32-byte hash digests (a, b).
     """
     # SHA3-512 produces a 64-byte digest
-    # full_digest = hashlib.sha3_512(c).digest()
+    # LOCAL SHA3
     full_digest = SHA3_512.new(c).digest()
+
+    # # LIB SHA3
+    # full_digest_lib = SHA3_512.new(c).digest()
+
+    # assert full_digest_lib == full_digest_local
 
     # Split the 64-byte digest into two 32-byte chunks
     a = full_digest[:32]
@@ -106,8 +121,12 @@ class XOF:
         Initializes the XOF context. This corresponds to XOF.Init().
         """
         # The shake_128 object holds the internal state (ctx)
-        # self._ctx = hashlib.shake_128()
+
+        # LOCAL SHA3
         self._ctx = SHAKE128.new()
+
+        # # LIB SHA3
+        # self._ctx = SHAKE128.new()
 
     def Absorb(self, data: bytes):
         """
@@ -117,7 +136,11 @@ class XOF:
         Args:
             data: The input bytes to absorb.
         """
+        # LOCAL SHA3
         self._ctx.update(data)
+        
+        # # LIB SHA3
+        # self._ctx.update(data)
 
     def Squeeze(self, num_bytes: int):
         """
@@ -130,5 +153,10 @@ class XOF:
         Returns:
             The generated output as a bytes object.
         """
-        return self._ctx.read(num_bytes)
 
+
+        # # LIB SHA3
+        # lib = self._ctx.read(num_bytes)
+
+        # assert local == lib
+        return self._ctx.read(num_bytes)
