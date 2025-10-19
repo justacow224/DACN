@@ -49,12 +49,6 @@ def parse_kat_file(filepath):
         
     return data
 
-
-# print("## ML-KEM-512 Full Cycle Test ##\n")
-
-# 1. GENERATE RECIPIENT'S KEYS
-# A potential recipient generates a key pair.
-
 elapsed_time_list = []
 
 
@@ -162,21 +156,22 @@ def TC_EncryptwAES_randomData():
 
 if __name__ == "__main__":
     n = 11
+    # The name of the file you uploaded
+    filename = TEST_FILENAME
+    
+    # Parse the file
+    parsed_data = parse_kat_file(filename)
     start_time = time.perf_counter()
+    
     for i in range(n):
-        # The name of the file you uploaded
-        filename = "KAT.txt"
-        
-        # Parse the file
-        parsed_data = parse_kat_file(filename)
-
-        # TC_KeyGen(parsed_data)
-        # TC_Encaps(parsed_data)
-        # TC_Decaps(parsed_data)
+        print("          ----- ROUND", i, " -----          ")
+        TC_KeyGen(parsed_data)
+        TC_Encaps(parsed_data)
+        TC_Decaps(parsed_data)
         TC_FullSequence(parsed_data)
 
 
-        # TC_EncryptwAES_randomData()
+        TC_EncryptwAES_randomData()
         
         # Skip the first time run since numba cost time to compile for the first time.
         if (i == 0):
@@ -184,10 +179,11 @@ if __name__ == "__main__":
             first_run_elapsed = first_run_end - start_time
             print(f"The code took {first_run_elapsed:.4f} seconds to execute for the first time.")
             start_time = time.perf_counter()
+        print('\n')
 
     end_time = time.perf_counter()
     if (n-1 != 0):
         elapsed_time = (end_time - start_time) / (n-1)
-        print(f"The code took {elapsed_time:.4f} seconds to execute.")
+        print(f"The code took averagely {elapsed_time:.4f} seconds to execute.")
 
 
