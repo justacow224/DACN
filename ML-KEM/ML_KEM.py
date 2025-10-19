@@ -3,7 +3,7 @@ import ML_KEM_internal
 
 
 
-def KeyGen():
+def KeyGen(d_Test=None, z_Test=None):
     """
     (Algorithm 19) Generates an encapsulation key and a corresponding
     decapsulation key for ML-KEM.
@@ -16,17 +16,24 @@ def KeyGen():
     try:
         d = os.urandom(32)
         z = os.urandom(32)
+
     except Exception as e:
         # Step 3-5: Handle potential failure in random byte generation
         raise RuntimeError("Failed to generate random bytes from OS.") from e
-
+    # d_hex = "7c9935a0b07694aa0c6d10e4db6b1add2fd81a25ccb148032dcd739936737f2d"
+    # z_hex = "b505d7cfad1b497499323c8686325e4792f267aafa3f87ca60d01cb54f29202a"
+    if d_Test is not None and z_Test is not None:
+        d = d_Test
+        z = z_Test
+    # print("d: ", d.hex())
+    # print("z: ", z.hex())
     # Step 6: Run the internal key generation algorithm
-    ek, dk = ML_KEM_internal.KeyGen_internal(d, z)
+    ek, dk = ML_KEM_internal.KeyGen_internal(d, z)  
     
     # Step 7: Return the key pair
     return (ek, dk)
 
-def Encaps(ek: bytes):
+def Encaps(ek: bytes, m_Test= None):
     """
     (Algorithm 20) Generates a shared secret and an associated ciphertext.
 
@@ -43,7 +50,8 @@ def Encaps(ek: bytes):
     except Exception as e:
         # Step 2-4: Handle potential failure in random byte generation
         raise RuntimeError("Failed to generate random bytes from OS.") from e
-
+    if m_Test is not None:
+        m = m_Test
     # Step 5: Run the internal encapsulation algorithm
     shared_secret, ciphertext = ML_KEM_internal.Encaps_internal(ek, m)
     

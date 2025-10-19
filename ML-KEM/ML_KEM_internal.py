@@ -70,13 +70,10 @@ def Decaps_internal(dk: bytes, c: bytes):
         The 32-byte shared secret K'.
     """
     # Step 1-4: Parse the decapsulation key dk
-    dk_pke_len = 384 * k
-    ek_pke_len = 384 * k + 32
-    
-    dk_PKE = dk[0:dk_pke_len]
-    ek_PKE = dk[dk_pke_len : dk_pke_len + ek_pke_len]
-    h = dk[dk_pke_len + ek_pke_len : dk_pke_len + ek_pke_len + 32]
-    z = dk[dk_pke_len + ek_pke_len + 32 : dk_pke_len + ek_pke_len + 64]
+    dk_PKE = dk[0:384*k]
+    ek_PKE = dk[384*k : 768*k + 32]
+    h = dk[768*k + 32 : 768*k + 64]
+    z = dk[768*k + 64 : 768*k + 96]
     
     # Step 5: Decrypt the ciphertext to get the candidate message m'
     m_prime = K_PKE.Decrypt(dk_PKE, c)

@@ -3,6 +3,52 @@ from GeneralAlgr import *
 from GLOBAL import *
 import time
 from Crypto.Cipher import AES
+import os
+
+def parse_kat_file(filepath):
+    """
+    Parses a key-value file and stores values with the same key into lists.
+    Values are converted from hex strings to bytes.
+
+    Args:
+        filepath (str): The path to the file to be parsed.
+
+    Returns:
+        dict: A dictionary where keys are the variable names (e.g., 'd', 'z')
+              and values are lists of the corresponding bytes values found in the file.
+              Returns an empty dictionary if the file cannot be read.
+    """
+    data = {}
+    try:
+        with open(filepath, 'r') as f:
+            for line in f:
+                # Ensure the line contains an equals sign before splitting
+                if '=' in line:
+                    # Split only on the first equals sign
+                    key, value = line.split('=', 1)
+                    
+                    # Clean up whitespace from the key
+                    key = key.strip()
+                    
+                    # Strip whitespace and convert the hex string value to bytes
+                    try:
+                        value_bytes = bytes.fromhex(value.strip())
+                    except ValueError:
+                        print(f"Warning: Could not decode hex value for key '{key}'. Skipping.")
+                        continue
+
+                    # Append the value to the list for this key.
+                    # If the key doesn't exist yet, create an empty list first.
+                    if key not in data:
+                        data[key] = []
+                    data[key].append(value_bytes)
+    except FileNotFoundError:
+        print(f"Error: The file '{filepath}' was not found.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        
+    return data
+
 
 # print("## ML-KEM-512 Full Cycle Test ##\n")
 
@@ -12,83 +58,131 @@ from Crypto.Cipher import AES
 elapsed_time_list = []
 
 
-for n in range(10):
-    start_time = time.perf_counter()
-    for i in range(1000):
+def TC_KeyGen(parsed_data: dict):
+    for i in range(100):
+        d = parsed_data.get('d')[i]
+        z = parsed_data.get('z')[i]
+        pk = parsed_data.get('pk')[i]
+        sk = parsed_data.get('sk')[i]
+
+
+
+        public_key, private_key = ML_KEM.KeyGen(d, z)
+
+        assert public_key == pk
+        assert private_key == sk
+
+    print("✅KeyGen() passed all 100 Testcases!")
+
+def TC_Encaps(parsed_data: dict):
+    for i in range(100):
+        pk = parsed_data.get('pk')[i]
+        m = parsed_data.get('m')[i]
+        ss = parsed_data.get('ss')[i]
+        ct = parsed_data.get('ct')[i]
+        
+
+        sender_shared_secret, ciphertext = ML_KEM.Encaps(pk, m)
+
+        assert sender_shared_secret == ss
+        assert ciphertext == ct
+
+    print("✅Encaps() passed all 100 Testcases!")
+
+def TC_Decaps(parsed_data: dict):
+    for i in range(100):
+        sk = parsed_data.get('sk')[i]
+        ss = parsed_data.get('ss')[i]
+        ct = parsed_data.get('ct')[i]
+
+        recipient_shared_secret = ML_KEM.Decaps(sk, ct)
+
+        assert recipient_shared_secret == ss
+
+    print("✅Decaps() passed all 100 Testcases!")
+
+
+def TC_FullSequence(parsed_data: dict):
+    for i in range(100):
+        d = parsed_data.get('d')[i]
+        z = parsed_data.get('z')[i]
+        pk = parsed_data.get('pk')[i]
+        sk = parsed_data.get('sk')[i]
+        m = parsed_data.get('m')[i]
+        ct = parsed_data.get('ct')[i]
+        ss = parsed_data.get('ss')[i]
+        
+        public_key, private_key = ML_KEM.KeyGen(d, z)
+        sender_shared_secret, ciphertext = ML_KEM.Encaps(pk, m)
+        recipient_shared_secret = ML_KEM.Decaps(sk, ct)
+
+
+        assert public_key == pk
+        assert private_key == sk
+        assert ciphertext == ct
+        assert sender_shared_secret == recipient_shared_secret
+        assert sender_shared_secret == ss
+        assert recipient_shared_secret == ss
+
+    print("✅Full Sequence Test passed all 100 Testcases!")
+
+def TC_EncryptwAES_randomData():
+    for i in range(100):
+        # 1. Alice
         public_key, private_key = ML_KEM.KeyGen()
-        # print("1. Recipient generated a public/private key pair.")
-        # print("Check:")
-        # print("   -> Public Key Length:", len(public_key))
-        # print("   -> Private Key Length:", len(private_key))
-        # print("Modulus check:")
-        # test = ByteEncode(12, ByteDecode(12, public_key[:384*k]))
-        # if test == public_key[:384*k]:
-        #     print("   -> Public Key encoding/decoding is consistent.")
 
-        # 2. SENDER ENCAPSULATES
-        # A sender uses the recipient's public key to create a shared secret
-        # and a ciphertext to send.
+        # 2. Bob recieved public key from Alice
+        # 3. Bob encapsulate the public key to generate shared secret key and ciphertext
         sender_shared_secret, ciphertext = ML_KEM.Encaps(public_key)
-        # print("2. Sender encapsulated a secret, generating a shared secret and a ciphertext.")
-        # print("Check:")
-        # print("   -> Ciphertext Length:", len(ciphertext))
-        # print(f"   -> Sender's Secret: {sender_shared_secret.hex()}")
 
-        # plaintext = b"Messi mai dinh"
+        # 4. Bob encrypt a plaintext using AES with shared secret key
+        plaintext = os.urandom(32)
+        # print(f"Original Plaintext: {plaintext.hex()}")
 
-        # aes_key = sender_shared_secret
+        cipher = AES.new(sender_shared_secret, AES.MODE_GCM)
+        ciphertext_AES, tag = cipher.encrypt_and_digest(plaintext)
+        nonce = cipher.nonce
+        
 
-        # cipher = AES.new(aes_key, AES.MODE_GCM)
-        # nonce = cipher.nonce
-        # aes_ciphertext, tag = cipher.encrypt_and_digest(plaintext)
-
-        # print(f"Plaintext: '{plaintext.decode()}'")
-        # print(f"AES Ciphertext (first 16 bytes): {aes_ciphertext[:16].hex()}...")
-        # print(f"Nonce: {nonce.hex()}")
-        # print(f"Authentication Tag: {tag.hex()}")
-        # print("-" * 40)
-
-        # 3. RECIPIENT DECAPSULATES
-        # The recipient uses their private key and the received ciphertext
-        # to derive their version of the shared secret.
+        # 5. Alice recieved ciphertext from Bob
+        # 6. Alice Decapsulate the ciphertext with private key to gain shared secret key
         recipient_shared_secret = ML_KEM.Decaps(private_key, ciphertext)
-        # print("\n3. Recipient decapsulated the ciphertext using their private key.")
-        # print(f"   -> Recipient's Secret: {recipient_shared_secret.hex()}")
 
-        # 4. VERIFY
-        # Both parties should now have the exact same 32-byte secret key.
-        # assert sender_shared_secret == recipient_shared_secret
-        # print("\n✅ Success! The sender's and recipient's shared secrets match perfectly.")
+        # 7. Alice received ciphertext_AES, tag and nonce from Bob
+        # 8. Alice decrypt the ciphertext_AES
+        decipher = AES.new(recipient_shared_secret, AES.MODE_GCM, nonce=nonce)
+        decrypted_plaintext = decipher.decrypt_and_verify(ciphertext_AES, tag)
 
-        # recipient_aes_key = recipient_shared_secret
-        # try:
-        #     # The recipient creates an AES object with the same key and nonce
-        #     decipher = AES.new(recipient_aes_key, AES.MODE_GCM, nonce=nonce)
-
-        #     # Decrypt and verify the authentication tag
-        #     # If the tag is invalid, this will raise a ValueError
-        #     decrypted_plaintext = decipher.decrypt_and_verify(aes_ciphertext, tag)
-
-        #     # print(f"✅ Decryption successful!")
-        #     print(f"Decrypted Message: '{decrypted_plaintext.decode()}'")
-
-        #     # Final check
-        #     assert plaintext == decrypted_plaintext
-
-        # except (ValueError, KeyError) as e:
-        #     print(f"❌ Decryption failed! The message may have been tampered with.")
+        # print(f"Decrypted Plaintext: {decrypted_plaintext.hex()}")
+        assert plaintext == decrypted_plaintext
+    print("✅Test with AES passed all 100 Testcases!")
 
 
+
+
+if __name__ == "__main__":
+    n = 11
+    start_time = time.perf_counter()
+    for i in range(n):
+        # The name of the file you uploaded
+        filename = "KAT.txt"
+        
+        # Parse the file
+        parsed_data = parse_kat_file(filename)
+
+        # TC_KeyGen(parsed_data)
+        # TC_Encaps(parsed_data)
+        # TC_Decaps(parsed_data)
+        TC_FullSequence(parsed_data)
+
+
+        # TC_EncryptwAES_randomData()
 
 
 
     end_time = time.perf_counter()
-    elapsed_time = end_time - start_time
-    elapsed_time_list.append(elapsed_time)
-# print(f"The code took {elapsed_time:.4f} seconds to execute.")
-
-# Calculate and print the average elapsed time
-average_time = sum(elapsed_time_list) / len(elapsed_time_list)
-print(f"Average elapsed time over 10 runs: {average_time:.4f} seconds")
+    if (n-1 != 0):
+        elapsed_time = (end_time - start_time) / (n-1)
+        print(f"The code took {elapsed_time:.4f} seconds to execute.")
 
 
