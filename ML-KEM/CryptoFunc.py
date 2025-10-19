@@ -1,5 +1,19 @@
 from GLOBAL import *
 from Crypto.Hash import SHAKE256, SHAKE128, SHA3_256, SHA3_512
+from SHA3 import (
+    SHAKE256 as my_SHAKE256,
+    SHAKE128 as my_SHAKE128,
+    SHA3_256 as my_SHA3_256,
+    SHA3_512 as my_SHA3_512
+)
+
+LIB_HASH    = 0
+MY_HASH     = 1
+
+
+
+
+HASH_MODE   = LIB_HASH
 
 def PRF(eta: int, s: bytes, b: int) -> bytes:
     """
@@ -35,14 +49,15 @@ def PRF(eta: int, s: bytes, b: int) -> bytes:
 
     # 5. Instantiate SHAKE256, update it with the concatenated data,
     #    and generate the digest of the required length.
-    # shake = hashlib.shake_256()
-    # shake.update(input_data)
-    
-    # return shake.digest(output_length_bytes)
 
-    shake = SHAKE256.new()
-    shake.update(input_data)
-    return shake.read(output_length_bytes)
+    if HASH_MODE == LIB_HASH:
+        return SHAKE256.new(input_data).read(output_length_bytes)
+    
+    elif HASH_MODE == MY_HASH:
+        return my_SHAKE256.new(input_data).read(output_length_bytes)
+    else:
+        raise Exception("Please choose Hash Library")
+
 
 
 def H(s: bytes) -> bytes:
@@ -55,8 +70,12 @@ def H(s: bytes) -> bytes:
     Returns:
         A 32-byte hash digest.
     """
-    # return hashlib.sha3_256(s).digest()
-    return SHA3_256.new(s).digest()
+    if HASH_MODE == LIB_HASH:
+        return SHA3_256.new(s).digest()
+    elif HASH_MODE == MY_HASH:
+        return my_SHA3_256.new(s).digest()
+    else:
+        raise Exception("Please choose Hash Library")
 
 def J(s: bytes) -> bytes:
     """
@@ -70,8 +89,14 @@ def J(s: bytes) -> bytes:
     """
     # The output length is 32 bytes (256 bits)
     output_length_bytes = 32
-    # return hashlib.shake_256(s).digest(output_length_bytes)
-    return SHAKE256.new(s).read(output_length_bytes)
+
+    if HASH_MODE == LIB_HASH:
+        return SHAKE256.new(s).read(output_length_bytes)
+    elif HASH_MODE == MY_HASH:
+        return my_SHAKE256.new(s).read(output_length_bytes)
+    else:
+        raise Exception("Please choose Hash Library")
+    
 
 def G(c: bytes) -> tuple[bytes, bytes]:
     """
@@ -85,8 +110,14 @@ def G(c: bytes) -> tuple[bytes, bytes]:
         A tuple containing two 32-byte hash digests (a, b).
     """
     # SHA3-512 produces a 64-byte digest
-    # full_digest = hashlib.sha3_512(c).digest()
-    full_digest = SHA3_512.new(c).digest()
+    full_digest = None
+    if HASH_MODE == LIB_HASH:
+        full_digest = SHA3_512.new(c).digest()
+    elif HASH_MODE == MY_HASH:
+        full_digest = my_SHA3_512.new(c).digest()
+    else:
+        raise Exception("Please choose Hash Library")
+    
 
     # Split the 64-byte digest into two 32-byte chunks
     a = full_digest[:32]
@@ -106,8 +137,13 @@ class XOF:
         Initializes the XOF context. This corresponds to XOF.Init().
         """
         # The shake_128 object holds the internal state (ctx)
-        # self._ctx = hashlib.shake_128()
-        self._ctx = SHAKE128.new()
+        if HASH_MODE == LIB_HASH:
+            self._ctx = SHAKE128.new()
+        elif HASH_MODE == MY_HASH:
+            self._ctx = my_SHAKE128.new()
+        else:
+            raise Exception("Please choose Hash Library")
+        
 
     def Absorb(self, data: bytes):
         """
