@@ -177,8 +177,13 @@ if __name__ == "__main__":
 
 
         # TC_EncryptwAES_randomData()
-
-
+        
+        # Skip the first time run since numba cost time to compile for the first time.
+        if (i == 0):
+            first_run_end = time.perf_counter()
+            first_run_elapsed = first_run_end - start_time
+            print(f"The code took {first_run_elapsed:.4f} seconds to execute for the first time.")
+            start_time = time.perf_counter()
 
     end_time = time.perf_counter()
     if (n-1 != 0):
