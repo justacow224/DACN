@@ -8,7 +8,7 @@ ML_KEM_512      = 0
 ML_KEM_768      = 1
 ML_KEM_1024     = 2
 
-ML_KEM_PARAMS   = ML_KEM_512
+ML_KEM_PARAMS   = ML_KEM_768
 
 
 

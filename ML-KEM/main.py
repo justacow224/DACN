@@ -151,11 +151,7 @@ def TC_EncryptwAES_randomData():
         assert plaintext == decrypted_plaintext
     print("✅Test with AES passed all 100 Testcases!")
 
-
-
-
-if __name__ == "__main__":
-    n = 11
+def run_TC(n: int):
     # The name of the file you uploaded
     filename = TEST_FILENAME
     
@@ -166,12 +162,12 @@ if __name__ == "__main__":
     for i in range(n):
         print("          ----- ROUND", i, " -----          ")
         TC_KeyGen(parsed_data)
-        TC_Encaps(parsed_data)
-        TC_Decaps(parsed_data)
-        TC_FullSequence(parsed_data)
+        # TC_Encaps(parsed_data)
+        # TC_Decaps(parsed_data)
+        # TC_FullSequence(parsed_data)
 
 
-        TC_EncryptwAES_randomData()
+        # TC_EncryptwAES_randomData()
         
         # Skip the first time run since numba cost time to compile for the first time.
         if (i == 0):
@@ -185,5 +181,68 @@ if __name__ == "__main__":
     if (n-1 != 0):
         elapsed_time = (end_time - start_time) / (n-1)
         print(f"The code took averagely {elapsed_time:.4f} seconds to execute.")
+
+KEYGEN = 0
+ENCAPS = 1
+DECAPS = 2
+FULL = 3
+def run_Benchmark(n: int, module: int):
+    # Skip first time run to avoid numba compilation time
+    public_key, private_key = ML_KEM.KeyGen()
+    sender_shared_secret, ciphertext = ML_KEM.Encaps(public_key)
+    recipient_shared_secret = ML_KEM.Decaps(private_key, ciphertext)
+
+    start_time = time.perf_counter()
+
+    keygen_total_elapsed = 0.0
+    encaps_total_elapsed = 0.0
+    decaps_total_elapsed = 0.0
+    
+    for i in range(n):
+        keygen_start = time.perf_counter()
+        public_key, private_key = ML_KEM.KeyGen()
+        keygen_end = time.perf_counter()
+        keygen_total_elapsed += keygen_end - keygen_start
+
+        encaps_start = time.perf_counter()
+        sender_shared_secret, ciphertext = ML_KEM.Encaps(public_key)
+        encaps_end = time.perf_counter()
+        encaps_total_elapsed += encaps_end - encaps_start
+
+        decaps_start = time.perf_counter()
+        recipient_shared_secret = ML_KEM.Decaps(private_key, ciphertext)
+        decaps_end = time.perf_counter()
+        decaps_total_elapsed += decaps_end - decaps_start
+
+        assert sender_shared_secret == recipient_shared_secret
+
+        if module == KEYGEN:
+            print(f"Round {i+1}: KeyGen() took {(keygen_end - keygen_start)*1000:.6f} ms to execute.")
+        elif module == ENCAPS:
+            print(f"Round {i+1}: Encaps() took {(encaps_end - encaps_start)*1000:.6f} ms to execute.")
+        elif module == DECAPS:
+            print(f"Round {i+1}: Decaps() took {(decaps_end - decaps_start)*1000:.6f} ms to execute.")
+        elif module == FULL:
+            round_total = (keygen_end - keygen_start) + (encaps_end - encaps_start) + (decaps_end - decaps_start)
+            print(f"Round {i+1}: Full sequence took {round_total*1000:.6f} ms to execute.")
+        
+
+    keygen_average = keygen_total_elapsed / n * 1000
+    encaps_average = encaps_total_elapsed / n * 1000
+    decaps_average = decaps_total_elapsed / n * 1000
+
+    if module == KEYGEN:
+        print(f"KeyGen() took averagely {keygen_average:.6f} ms to execute.")
+    elif module == ENCAPS:
+        print(f"Encaps() took averagely {encaps_average:.6f} ms to execute.")
+    elif module == DECAPS:
+        print(f"Decaps() took averagely {decaps_average:.6f} ms to execute.")
+    elif module == FULL:
+        total_average = keygen_average + encaps_average + decaps_average
+        print(f"Full sequence took averagely {total_average:.6f} ms to execute.")
+
+if __name__ == "__main__":
+    # run_TC(n=5)
+    run_Benchmark(n=10, module=DECAPS) # KEYGEN, ENCAPS, DECAPS, FULL
 
 
