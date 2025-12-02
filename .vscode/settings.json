@@ -1,0 +1,7 @@
+{
+  "python.analysis.typeCheckingMode": "basic",  // hoặc "strict" nếu bạn muốn kiểm tra nghiêm ngặt
+  "python.analysis.autoSearchPaths": true,    // Tự động tìm kiếm và chỉ ra đường dẫn các thư viện cần thiết
+  "python.analysis.useLibraryCodeForTypes": true, // Sử dụng mã nguồn thư viện để phân tích
+  "python.analysis.indexing": true,            // Bật indexing để công cụ phân tích đọc toàn bộ codebase
+//   "python.autoComplete.extraPaths": ["/path/to/your/project"]
+}

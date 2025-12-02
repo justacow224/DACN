@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dacn"
+version = "0.1.0"
+description = "DACN - Secure Camera System with ML-KEM and AES"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "matplotlib",
+    "pycryptodome",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["AES_CTR", "ML-KEM"]

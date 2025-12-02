@@ -1,8 +1,8 @@
-from GLOBAL import *
-from SamplingAlgr import *
-from CryptoFunc import *
-from NTT import *
-from GeneralAlgr import *
+from .GLOBAL import *
+from .SamplingAlgr import *
+from .CryptoFunc import *
+from .NTT import *
+from .GeneralAlgr import *
 
 def KeyGen(d: bytes):
     """

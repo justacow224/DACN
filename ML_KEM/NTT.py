@@ -1,4 +1,4 @@
-from GLOBAL import *
+from .GLOBAL import *
 
 
 def bit_reverse(n, bits):

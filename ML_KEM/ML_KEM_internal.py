@@ -1,5 +1,5 @@
-import K_PKE
-from CryptoFunc import *
+from . import K_PKE
+from .CryptoFunc import *
 
 def KeyGen_internal(d: bytes, z: bytes):
     """

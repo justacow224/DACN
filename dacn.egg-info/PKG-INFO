@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: dacn
+Version: 0.1.0
+Summary: DACN - Secure Camera System with ML-KEM and AES
+Requires-Python: >=3.8
+Requires-Dist: numpy
+Requires-Dist: opencv-python
+Requires-Dist: matplotlib
+Requires-Dist: pycryptodome

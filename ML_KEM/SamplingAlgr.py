@@ -1,6 +1,6 @@
-from GLOBAL import *
-import GeneralAlgr
-import CryptoFunc
+from .GLOBAL import *
+from . import GeneralAlgr
+from . import CryptoFunc
 
 
 

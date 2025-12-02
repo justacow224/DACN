@@ -1,5 +1,5 @@
 import os
-import ML_KEM_internal
+from . import ML_KEM_internal
 
 
 
