@@ -1,6 +1,13 @@
-import ML_KEM
-from GeneralAlgr import *
-from GLOBAL import *
+import sys
+import os
+
+# Thêm parent folder vào path để có thể chạy trực tiếp
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from ML_KEM import ML_KEM
+from ML_KEM.GeneralAlgr import *
+from ML_KEM.GLOBAL import *
 import time
 from Crypto.Cipher import AES
 import os
@@ -53,13 +60,16 @@ elapsed_time_list = []
 
 
 def TC_KeyGen(parsed_data: dict):
+    d_list = parsed_data['d']
+    z_list = parsed_data['z']
+    pk_list = parsed_data['pk']
+    sk_list = parsed_data['sk']
+    
     for i in range(100):
-        d = parsed_data.get('d')[i]
-        z = parsed_data.get('z')[i]
-        pk = parsed_data.get('pk')[i]
-        sk = parsed_data.get('sk')[i]
-
-
+        d = d_list[i]
+        z = z_list[i]
+        pk = pk_list[i]
+        sk = sk_list[i]
 
         public_key, private_key = ML_KEM.KeyGen(d, z)
 
@@ -69,12 +79,16 @@ def TC_KeyGen(parsed_data: dict):
     print("✅KeyGen() passed all 100 Testcases!")
 
 def TC_Encaps(parsed_data: dict):
+    pk_list = parsed_data['pk']
+    m_list = parsed_data['m']
+    ss_list = parsed_data['ss']
+    ct_list = parsed_data['ct']
+    
     for i in range(100):
-        pk = parsed_data.get('pk')[i]
-        m = parsed_data.get('m')[i]
-        ss = parsed_data.get('ss')[i]
-        ct = parsed_data.get('ct')[i]
-        
+        pk = pk_list[i]
+        m = m_list[i]
+        ss = ss_list[i]
+        ct = ct_list[i]
 
         sender_shared_secret, ciphertext = ML_KEM.Encaps(pk, m)
 
@@ -84,10 +98,14 @@ def TC_Encaps(parsed_data: dict):
     print("✅Encaps() passed all 100 Testcases!")
 
 def TC_Decaps(parsed_data: dict):
+    sk_list = parsed_data['sk']
+    ss_list = parsed_data['ss']
+    ct_list = parsed_data['ct']
+    
     for i in range(100):
-        sk = parsed_data.get('sk')[i]
-        ss = parsed_data.get('ss')[i]
-        ct = parsed_data.get('ct')[i]
+        sk = sk_list[i]
+        ss = ss_list[i]
+        ct = ct_list[i]
 
         recipient_shared_secret = ML_KEM.Decaps(sk, ct)
 
@@ -97,14 +115,22 @@ def TC_Decaps(parsed_data: dict):
 
 
 def TC_FullSequence(parsed_data: dict):
+    d_list = parsed_data['d']
+    z_list = parsed_data['z']
+    pk_list = parsed_data['pk']
+    sk_list = parsed_data['sk']
+    m_list = parsed_data['m']
+    ct_list = parsed_data['ct']
+    ss_list = parsed_data['ss']
+    
     for i in range(100):
-        d = parsed_data.get('d')[i]
-        z = parsed_data.get('z')[i]
-        pk = parsed_data.get('pk')[i]
-        sk = parsed_data.get('sk')[i]
-        m = parsed_data.get('m')[i]
-        ct = parsed_data.get('ct')[i]
-        ss = parsed_data.get('ss')[i]
+        d = d_list[i]
+        z = z_list[i]
+        pk = pk_list[i]
+        sk = sk_list[i]
+        m = m_list[i]
+        ct = ct_list[i]
+        ss = ss_list[i]
         
         public_key, private_key = ML_KEM.KeyGen(d, z)
         sender_shared_secret, ciphertext = ML_KEM.Encaps(pk, m)
@@ -243,6 +269,6 @@ def run_Benchmark(n: int, module: int):
 
 if __name__ == "__main__":
     # run_TC(n=5)
-    run_Benchmark(n=10, module=DECAPS) # KEYGEN, ENCAPS, DECAPS, FULL
+    run_Benchmark(n=10, module=FULL) # KEYGEN, ENCAPS, DECAPS, FULL
 
 
