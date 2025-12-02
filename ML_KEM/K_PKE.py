@@ -4,6 +4,7 @@ from .CryptoFunc import *
 from .NTT import *
 from .GeneralAlgr import *
 
+
 def KeyGen(d: bytes):
     """
     (Algorithm 13) Generates a public and private key pair for Kyber PKE.
@@ -18,7 +19,7 @@ def KeyGen(d: bytes):
         raise ValueError("Input seed d must be 32 bytes.")
 
     # Step 1: Expand d into two 32-byte seeds
-    rho, sigma = G(d)
+    rho, sigma = G(d + bytes([k]))
     
     # Step 2: Initialize nonce N
     N = 0
@@ -28,8 +29,7 @@ def KeyGen(d: bytes):
     for i in range(k):
         for j in range(k):
             # Input to SampleNTT is rho || j || i
-            input_bytes = rho + j.to_bytes(1, 'little') + i.to_bytes(1, 'little')
-            A_hat[i][j] = SampleNTT(input_bytes)
+            A_hat[i][j] = SampleNTT(rho + bytes([j]) + bytes([i]))
             
     # Step 8-11: Generate secret vector s
     s = [None] * k
@@ -63,15 +63,16 @@ def KeyGen(d: bytes):
         
         # Add error term: row_result + e_hat_i
         t_hat[i] = [(x + y) % q for x, y in zip(row_result, e_hat[i])]
+
         
     # Step 19: Form the public key ek_PKE
     # Concatenate the byte-encoded polynomials of t_hat
-    ek_PKE_parts = [ByteEncode(12, poly) for poly in t_hat]
+    ek_PKE_parts = [bytes(ByteEncode(12, poly)) for poly in t_hat]
     ek_PKE = b"".join(ek_PKE_parts) + rho
     
     # Step 20: Form the private key dk_PKE
     # Concatenate the byte-encoded polynomials of s
-    dk_PKE_parts = [ByteEncode(12, poly) for poly in s]
+    dk_PKE_parts = [bytes(ByteEncode(12, poly)) for poly in s_hat]
     dk_PKE = b"".join(dk_PKE_parts)
     
     # Step 21: Return key pair
@@ -101,7 +102,7 @@ def Encrypt(ek_PKE: bytes, m: bytes, r: bytes):
     t_hat = [ByteDecode(12, t_hat_bytes[i*384:(i+1)*384]) for i in range(k)]
 
     # Step 4-8: Re-generate matrix Â from seed ρ
-    A_hat = [[SampleNTT(rho + j.to_bytes(1,'little') + i.to_bytes(1,'little')) for j in range(k)] for i in range(k)]
+    A_hat = [[SampleNTT(rho + bytes([j]) + bytes([i])) for j in range(k)] for i in range(k)]
     
     # Step 9-11: Generate ephemeral secret y
     y = [SamplePolyCBD(eta1, PRF(eta1, r, N + i)) for i in range(k)]; N += k
@@ -129,7 +130,7 @@ def Encrypt(ek_PKE: bytes, m: bytes, r: bytes):
     # Step 20: Encode message m into polynomial v
     m_poly_uncompressed = ByteDecode(1, m)
     v = [decompress(1, bit) for bit in m_poly_uncompressed]
-    
+
     # Step 21: Compute v' = NTT⁻¹(t̂ᵀ ○ ŷ) + e₂ + v
     # Dot product in NTT domain
     dot_prod = MultiplyNTTs(t_hat[0], y_hat[0])
@@ -142,12 +143,12 @@ def Encrypt(ek_PKE: bytes, m: bytes, r: bytes):
     
     # Step 22: Compress and encode u into c₁
     u_compressed = [[compress(du, coeff) for coeff in poly] for poly in u]
-    c1_parts = [ByteEncode(du, poly) for poly in u_compressed]
+    c1_parts = [bytes(ByteEncode(du, poly)) for poly in u_compressed]
     c1 = b"".join(c1_parts)
     
     # Step 23: Compress and encode v' into c₂
     v_prime_compressed = [compress(dv, coeff) for coeff in v_prime]
-    c2 = ByteEncode(dv, v_prime_compressed)
+    c2 = bytes(ByteEncode(dv, v_prime_compressed))
     
     # Step 24: Return ciphertext
     return c1 + c2
@@ -164,9 +165,9 @@ def Decrypt(dk_PKE: bytes, c: bytes):
         The decrypted 32-byte message.
     """
     # Step 1-2: Split ciphertext into c1 and c2
-    c1_len = 32 * du * k
-    c1 = c[:c1_len]
-    c2 = c[c1_len:]
+    c1 = c[:32*du*k]
+    c2 = c[32*du*k : 32*(du*k + dv)]
+
 
     # Step 3: Decode and decompress u'
     u_compressed = [ByteDecode(du, c1[i*32*du:(i+1)*32*du]) for i in range(k)]
@@ -177,9 +178,8 @@ def Decrypt(dk_PKE: bytes, c: bytes):
     v_prime = [decompress(dv, coeff) for coeff in v_prime_compressed]
     
     # Step 5: Decode the private key s (it's already in NTT form)
-    s_poly = [ByteDecode(12, dk_PKE[i*384:(i+1)*384]) for i in range(k)]
+    s_hat = [ByteDecode(12, dk_PKE[i*384:(i+1)*384]) for i in range(k)]
 
-    s_hat = [NTT(p) for p in s_poly]
     
     # Step 6: Compute w = v' - NTT⁻¹(ŝᵀ ○ NTT(u'))
     u_prime_hat = [NTT(p) for p in u_prime]
@@ -196,7 +196,7 @@ def Decrypt(dk_PKE: bytes, c: bytes):
     
     # Step 7: Compress w to recover message bits, then encode to bytes
     message_bits = [compress(1, coeff) for coeff in w]
-    m = ByteEncode(1, message_bits)
+    m = bytes(ByteEncode(1, message_bits))
     
     # Step 8: Return the message
     return m

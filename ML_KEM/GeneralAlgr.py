@@ -1,7 +1,9 @@
 from .GLOBAL import *
+from numba import jit
 
 
-
+# ASSERTED
+@jit(nopython=True, cache=True)
 def BitsToBytes(b: list[int]) -> bytes:
     """
     Converts a bit array into a byte array using little-endian bit packing.
@@ -15,25 +17,47 @@ def BitsToBytes(b: list[int]) -> bytes:
     Raises:
         ValueError: If the input list length is not a multiple of 8.
     """
+    
     if len(b) % 8 != 0:
         raise ValueError("Input bit array length must be a multiple of 8.")
 
-    byte_array = bytearray()
+    ### NON NUMBA ###
+    # byte_array = bytearray()
     
-    # Process the bit array in chunks of 8
-    for i in range(0, len(b), 8):
-        chunk = b[i : i+8]
+    # # Process the bit array in chunks of 8
+    # for i in range(0, len(b), 8):
+    #     chunk = b[i : i+8]
         
-        # Calculate the integer value of the 8 bits (little-endian)
-        byte_val = 0
-        for j in range(8):
-            # b[0] is LSB, b[7] is MSB
-            byte_val += chunk[j] * (2**j)
+    #     # Calculate the integer value of the 8 bits (little-endian)
+    #     byte_val = 0
+    #     for j in range(8):
+    #         # b[0] is LSB, b[7] is MSB
+    #         byte_val += chunk[j] * (2**j)
             
-        byte_array.append(byte_val)
+    #     byte_array.append(byte_val)
         
-    return bytes(byte_array)
+    # return bytes(byte_array)
 
+
+    ### NUMBA ###
+    num_bytes = len(b) // 8
+    byte_list = [0] * num_bytes
+    
+    for i in range(num_bytes):
+        val = 0
+        for j in range(8):
+            val += b[i * 8 + j] * (1 << j)
+        byte_list[i] = val
+            
+    # Numba can't return `bytes`, so we return a list of ints
+    # The final conversion happens outside the jitted function
+
+    return byte_list
+
+
+
+# ASSERTED
+@jit(nopython=True, cache=True)
 def BytesToBits(B: bytes) -> list[int]:
     """
     Converts a byte array into a bit array using little-endian bit unpacking.
@@ -44,18 +68,31 @@ def BytesToBits(B: bytes) -> list[int]:
     Returns:
         A list of bits (0s or 1s) representing the unpacked bytes.
     """
-    bit_array = []
+    ### NON NUMBA ###
+    # bit_array = []
     
-    # Iterate through each byte in the input
-    for byte_val in B:
-        # Extract the 8 bits for the current byte (little-endian)
-        for j in range(8):
-            # Extract j-th bit and append. (byte >> j) & 1 gets the LSB first.
-            bit = (byte_val >> j) & 1
-            bit_array.append(bit)
+    # # Iterate through each byte in the input
+    # for byte_val in B:
+    #     # Extract the 8 bits for the current byte (little-endian)
+    #     for j in range(8):
+    #         # Extract j-th bit and append. (byte >> j) & 1 gets the LSB first.
+    #         bit = (byte_val >> j) & 1
+    #         bit_array.append(bit)
             
-    return bit_array
+    # return bit_array
 
+
+
+    ### NUMBA ###
+    bit_list = [0] * (len(B) * 8)
+    for i in range(len(B)):
+        byte_val = B[i]
+        for j in range(8):
+            bit_list[i * 8 + j] = (byte_val >> j) & 1
+
+    return bit_list
+
+@jit(nopython=True, cache=True)
 def compress(d: int, x: int) -> int:
     """
     Implements the Compress function from the specification.
@@ -81,6 +118,7 @@ def compress(d: int, x: int) -> int:
     # Step 2: Apply the modulo
     return compressed_val % two_d
 
+@jit(nopython=True, cache=True)
 def decompress(d: int, y: int) -> int:
     """
     Implements the Decompress function from the specification.
@@ -102,14 +140,15 @@ def decompress(d: int, y: int) -> int:
     
     return decompressed_val
 
+@jit(nopython=True, cache=True)
 def ByteEncode(d: int, F: list[int]) -> bytes:
     """
     (Algorithm 5) Encodes an array of 256 d-bit integers into a byte array.
     """
     if not (1 <= d <= 12):
         raise ValueError("Parameter d must be between 1 and 12.")
-    # if len(F) != 256:
-    #     raise ValueError("Input array F must have 256 integers.")
+    if len(F) != 256:
+        raise ValueError("Input array F must have 256 integers.")
     
     # Total number of bits will be 256 * d
     bits = [0] * (256 * d)
@@ -124,15 +163,16 @@ def ByteEncode(d: int, F: list[int]) -> bytes:
             
     return BitsToBytes(bits)
 
+@jit(nopython=True, cache=True)
 def ByteDecode(d: int, B: bytes) -> list[int]:
     """
     (Algorithm 6) Decodes a byte array into an array of 256 d-bit integers.
     """
     if not (1 <= d <= 12):
         raise ValueError("Parameter d must be between 1 and 12.")
-    # expected_len = 32 * d
-    # if len(B) != expected_len:
-    #      raise ValueError(f"Input byte array B must have length {expected_len}.")
+    expected_len = 32 * d
+    if len(B) != expected_len:
+         raise ValueError(f"Input byte array B must have length {expected_len}.")
 
     bits = BytesToBits(B)
     F = [0] * 256
