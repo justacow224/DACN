@@ -40,14 +40,17 @@ void ml_kem_decaps(
     #pragma HLS INTERFACE m_axi port=ss_out bundle=gmem1 depth=32 max_widen_bitwidth=128
     #pragma HLS INTERFACE s_axilite port=return
 
-    // --- 2. RESOURCE ALLOCATION (2-LANE SAFE) ---
-    #pragma HLS ALLOCATION function instances=keccak_f1600 limit=2
-    #pragma HLS ALLOCATION function instances=ntt limit=2
-    #pragma HLS ALLOCATION function instances=inv_ntt limit=2
-    #pragma HLS ALLOCATION function instances=poly_pointwise limit=2
+    // --- CẤU HÌNH 3-LANE (MAX PERFORMANCE) ---
+    // Bây giờ ta đã đủ giàu (tài nguyên), hãy chi tiêu phóng khoáng!
+    #pragma HLS ALLOCATION function instances=keccak_f1600 limit=3
+    #pragma HLS ALLOCATION function instances=ntt limit=3
+    #pragma HLS ALLOCATION function instances=inv_ntt limit=3
+    #pragma HLS ALLOCATION function instances=poly_pointwise limit=3
     
-    #pragma HLS ALLOCATION function instances=poly_compress_u limit=2
-    #pragma HLS ALLOCATION function instances=poly_decompress_u limit=2
+    // Các hàm nén/giải nén vẫn giữ limit=2 hoặc tăng lên 3 nếu thích
+    // (nhưng 2 là đủ vì AXI bottleneck vẫn còn)
+    #pragma HLS ALLOCATION function instances=poly_compress_u limit=3
+    #pragma HLS ALLOCATION function instances=poly_decompress_u limit=3
 
     // --- 3. BUFFER PARTITIONING ---
     // Factor=2 cho các mảng hệ số để khớp với NTT factor=2
@@ -80,7 +83,7 @@ void ml_kem_decaps(
     #pragma HLS ARRAY_PARTITION variable=u_hat dim=2 cyclic factor=2
 
     NTT_U_Loop: for(int i=0; i<KYBER_K; i++) {
-        #pragma HLS UNROLL factor=2 
+        #pragma HLS UNROLL
         for(int k=0; k<KYBER_N; k++) {
             #pragma HLS PIPELINE II=1
             u_hat[i][k] = u_poly[i][k];
@@ -96,7 +99,7 @@ void ml_kem_decaps(
     #pragma HLS ARRAY_PARTITION variable=prod_temp dim=2 cyclic factor=2 // (NEW: Fix bottleneck)
 
     Pointwise_Loop: for(int i=0; i<KYBER_K; i++) {
-        #pragma HLS UNROLL factor=2 
+        #pragma HLS UNROLL
         poly_pointwise(s_hat[i], u_hat[i], prod_temp[i]);
     }
 
@@ -162,7 +165,7 @@ void ml_kem_decaps(
     #pragma HLS ARRAY_PARTITION variable=e1 dim=2 cyclic factor=2
     
     Gen_Noise_Loop: for(int i=0; i<KYBER_K; i++) {
-        #pragma HLS UNROLL factor=2 
+        #pragma HLS UNROLL
         
         uint8 prf_in_r[33];
         #pragma HLS ARRAY_PARTITION variable=prf_in_r complete
@@ -206,7 +209,7 @@ void ml_kem_decaps(
     #pragma HLS ARRAY_PARTITION variable=u_prime dim=2 cyclic factor=2
 
     Calc_U_Prime_Loop: for(int i=0; i<KYBER_K; i++) {
-        #pragma HLS UNROLL factor=2 
+        #pragma HLS UNROLL 
         
         int16 acc[256] = {0};
         #pragma HLS ARRAY_PARTITION variable=acc cyclic factor=2
@@ -255,7 +258,7 @@ void ml_kem_decaps(
     #pragma HLS ARRAY_PARTITION variable=v_prod_temp dim=2 cyclic factor=2 // (NEW)
 
     for(int i=0; i<KYBER_K; i++) {
-        #pragma HLS UNROLL factor=2 
+        #pragma HLS UNROLL 
         poly_pointwise(t_hat[i], r_hat[i], v_prod_temp[i]);
     }
     
