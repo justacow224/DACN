@@ -34,10 +34,19 @@ void ml_kem_decaps(
     uint8 ss_out[SS_SIZE]
 ) {
     // --- 1. AXI INTERFACE OPTIMIZED ---
-    // Thêm max_widen_bitwidth=128 để mở rộng bus dữ liệu
-    #pragma HLS INTERFACE m_axi port=sk_in bundle=gmem0 depth=2400 max_widen_bitwidth=128
-    #pragma HLS INTERFACE m_axi port=ct_in bundle=gmem0 depth=1088 max_widen_bitwidth=128
-    #pragma HLS INTERFACE m_axi port=ss_out bundle=gmem1 depth=32 max_widen_bitwidth=128
+// 1. Secret Key: Cổng gmem0, Bus 128-bit
+    #pragma HLS INTERFACE m_axi port=sk_in bundle=gmem0 depth=2400 \
+        max_widen_bitwidth=128 latency=32 num_read_outstanding=16
+        
+    // 2. Ciphertext: Cổng gmem1 (Riêng biệt), Bus 128-bit
+    #pragma HLS INTERFACE m_axi port=ct_in bundle=gmem1 depth=1088 \
+        max_widen_bitwidth=128 latency=32 num_read_outstanding=16
+        
+    // 3. Output: Cổng gmem2 (Riêng biệt), Bus 128-bit
+    #pragma HLS INTERFACE m_axi port=ss_out bundle=gmem2 depth=32 \
+        max_widen_bitwidth=128 latency=32 num_write_outstanding=16
+        
+    // Control Port
     #pragma HLS INTERFACE s_axilite port=return
 
     // --- CẤU HÌNH 3-LANE (MAX PERFORMANCE) ---
@@ -66,6 +75,28 @@ void ml_kem_decaps(
     int16 v_poly[KYBER_N]; // Scalar
     #pragma HLS ARRAY_PARTITION variable=v_poly cyclic factor=2
 
+
+    // Buffer cho Secret Key (2400 bytes)
+    uint8 sk_local[SK_SIZE];
+    // Partition factor 16 để khớp với bus 128-bit (16 bytes)
+    // Giúp ghi vào BRAM nhanh bằng tốc độ AXI đọc về
+    #pragma HLS ARRAY_PARTITION variable=sk_local cyclic factor=16 
+
+    // Buffer cho Ciphertext (1088 bytes)
+    uint8 ct_local[CT_SIZE];
+    #pragma HLS ARRAY_PARTITION variable=ct_local cyclic factor=16
+
+    // =========================================================
+    // 2. BURST READ (NẠP DỮ LIỆU) - QUAN TRỌNG NHẤT
+    // =========================================================
+    
+    // Đọc SK một lèo (Burst length lớn)
+    // HLS sẽ dùng AXI 128-bit để copy cực nhanh
+    memcpy(sk_local, sk_in, SK_SIZE * sizeof(uint8));
+
+    // Đọc CT một lèo
+    memcpy(ct_local, ct_in, CT_SIZE * sizeof(uint8));
+
     // --- 1. UNPACK ---
     Unpack_SK_Loop: for(int i=0; i<KYBER_K; i++) {
         // Tự động nhanh hơn nhờ AXI 128-bit
@@ -73,9 +104,9 @@ void ml_kem_decaps(
     }
 
     Unpack_CT_Loop: for(int i=0; i<KYBER_K; i++) {
-        poly_decompress_u(&ct_in[i*320], u_poly[i]);
+        poly_decompress_u(&ct_local[i*320], u_poly[i]);
     }
-    poly_decompress_v(&ct_in[KYBER_K*320], v_poly);
+    poly_decompress_v(&ct_local[KYBER_K*320], v_poly);
 
     // --- 2. DECRYPT ---
     int16 u_hat[KYBER_K][KYBER_N];
@@ -133,7 +164,7 @@ void ml_kem_decaps(
     uint8 g_in[64];
     #pragma HLS ARRAY_PARTITION variable=g_in complete // Register
     for(int i=0; i<32; i++) g_in[i] = m_prime[i];
-    for(int i=0; i<32; i++) g_in[32+i] = sk_in[2336+i]; 
+    for(int i=0; i<32; i++) g_in[32+i] = sk_local[2336+i]; 
     
     uint8 Kr_prime[64];
     #pragma HLS ARRAY_PARTITION variable=Kr_prime complete
@@ -147,7 +178,7 @@ void ml_kem_decaps(
     #pragma HLS ARRAY_PARTITION variable=t_hat dim=1 type=complete
     #pragma HLS ARRAY_PARTITION variable=t_hat dim=2 cyclic factor=2
     
-    uint8* pk_ptr = &sk_in[1152];
+    uint8* pk_ptr = &sk_local[1152];
     for(int i=0; i<KYBER_K; i++) {
         poly_frombytes(&pk_ptr[i*384], t_hat[i]);
     }
@@ -292,7 +323,7 @@ void ml_kem_decaps(
         poly_compress_u(u_prime[i], cmp_buf);
         for(int k=0; k<320; k++) {
             #pragma HLS PIPELINE II=1
-            if (ct_in[i*320 + k] != cmp_buf[k]) fail = 1;
+            if (ct_local[i*320 + k] != cmp_buf[k]) fail = 1;
         }
     }
     
@@ -300,15 +331,15 @@ void ml_kem_decaps(
     poly_compress_v(v_prime, v_cmp_buf);
     for(int k=0; k<128; k++) {
         #pragma HLS PIPELINE II=1
-        if (ct_in[KYBER_K*320 + k] != v_cmp_buf[k]) fail = 1;
+        if (ct_local[KYBER_K*320 + k] != v_cmp_buf[k]) fail = 1;
     }
 
     if (fail == 0) {
         for(int i=0; i<32; i++) ss_out[i] = Kr_prime[i];
     } else {
         uint8 fail_input[32 + CT_SIZE];
-        for(int i=0; i<32; i++) fail_input[i] = sk_in[2368+i]; 
-        for(int i=0; i<CT_SIZE; i++) fail_input[32+i] = ct_in[i]; 
+        for(int i=0; i<32; i++) fail_input[i] = sk_local[2368+i]; 
+        for(int i=0; i<CT_SIZE; i++) fail_input[32+i] = ct_local[i]; 
         
         uint8 fail_hash[64];
         sha3_512_64bytes(fail_input, fail_hash);
