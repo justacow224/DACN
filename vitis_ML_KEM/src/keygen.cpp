@@ -13,6 +13,39 @@ extern void poly_pointwise(int16 a[256], int16 b[256], int16 r[256]);
 extern void xof_absorb_squeeze(ap_uint<64> input_B[5], hls::stream<uint8>& out_stream);
 extern void parse_ntt(hls::stream<uint8>& in_bytes, int16 a_hat[KYBER_N]);
 
+static void sha3_256_pk_keygen(uint8 input[1184], uint8 output[32]) {
+    #pragma HLS INLINE off
+    uint64_t state[25] = {0};
+    #pragma HLS ARRAY_PARTITION variable=state type=complete
+    
+    for(int b=0; b<8; b++) {
+        for(int w=0; w<17; w++) {
+            #pragma HLS PIPELINE II=1
+            uint64_t word = 0;
+            int base_idx = b*136 + w*8;
+            for(int j=0; j<8; j++) word |= ((uint64_t)input[base_idx+j] << (j*8));
+            state[w] ^= word;
+        }
+        keccak_f1600(state);
+    }
+    int offset = 1088;
+    for(int w=0; w<12; w++) {
+        #pragma HLS PIPELINE II=1
+        uint64_t word = 0;
+        for(int j=0; j<8; j++) word |= ((uint64_t)input[offset + w*8 + j] << (j*8));
+        state[w] ^= word;
+    }
+    state[12] ^= 0x06;
+    state[16] ^= (1ULL << 63); 
+    keccak_f1600(state);
+    
+    for(int i=0; i<4; i++) {
+        #pragma HLS UNROLL
+        uint64_t w = state[i];
+        for(int j=0; j<8; j++) output[i*8+j] = (uint8)(w >> (j*8));
+    }
+}
+
 static void poly_tobytes(int16 coeffs[KYBER_N], uint8 output[384]) {
     #pragma HLS INLINE
     for(int i=0; i<KYBER_N/2; i++) {
@@ -25,8 +58,8 @@ static void poly_tobytes(int16 coeffs[KYBER_N], uint8 output[384]) {
     }
 }
 
-#define PK_SIZE_BYTES (384 * KYBER_K + 32)
-#define SK_SIZE_BYTES (384 * KYBER_K)
+#define PK_SIZE_BYTES 1184
+#define SK_SIZE_BYTES 2400
 
 void ml_kem_keygen(
     ap_uint<64> seed_d[4],
@@ -37,15 +70,15 @@ void ml_kem_keygen(
     #pragma HLS INTERFACE m_axi port=seed_d bundle=gmem0 depth=4 max_widen_bitwidth=128
     #pragma HLS INTERFACE m_axi port=seed_z bundle=gmem0 depth=4 max_widen_bitwidth=128
     #pragma HLS INTERFACE m_axi port=pk_out bundle=gmem1 depth=1184 max_widen_bitwidth=128
-    #pragma HLS INTERFACE m_axi port=sk_out bundle=gmem1 depth=1152 max_widen_bitwidth=128
+    #pragma HLS INTERFACE m_axi port=sk_out bundle=gmem1 depth=2400 max_widen_bitwidth=128
     #pragma HLS INTERFACE s_axilite port=return
 
     // --- CHIẾN LƯỢC LIMIT = 5 (SWEET SPOT) ---
     // 5 bộ Keccak sẽ xử lý 9 phần tử ma trận trong 2 lượt (5 song song -> 4 song song)
     // Tổng cộng sẽ có 1 bộ cho Hash/Noise + 5 bộ cho Matrix = 6 bộ vật lý được tạo ra
-    #pragma HLS ALLOCATION function instances=keccak_f1600 limit=6
-    #pragma HLS ALLOCATION function instances=ntt limit=6
-    #pragma HLS ALLOCATION function instances=poly_pointwise limit=6
+    #pragma HLS ALLOCATION function instances=keccak_f1600 limit=3
+    #pragma HLS ALLOCATION function instances=ntt limit=3
+    #pragma HLS ALLOCATION function instances=poly_pointwise limit=3
 
     // --- BUFFERS ---
     int16 s_hat[KYBER_K][KYBER_N];
@@ -184,6 +217,37 @@ void ml_kem_keygen(
     for(int i=0; i<32; i++) {
         #pragma HLS PIPELINE II=1
         pk_local[rho_offset + i] = rho[i];
+    }
+    
+
+    // 1. Ghi Public Key (1184 bytes) vào sau s
+    Pack_PK_into_SK: for(int i=0; i<PK_SIZE_BYTES; i++) {
+        #pragma HLS PIPELINE II=1
+        sk_local[1152 + i] = pk_local[i];
+    }
+
+    // 2. Băm Public Key lấy 32 bytes H(pk)
+    uint8 hpk[32];
+    #pragma HLS ARRAY_PARTITION variable=hpk complete
+    sha3_256_pk_keygen(pk_local, hpk);
+    
+    // 3. Ghi H(pk) vào sau pk
+    Pack_Hash_into_SK: for(int i=0; i<32; i++) {
+        #pragma HLS PIPELINE II=1
+        sk_local[2336 + i] = hpk[i];
+    }
+
+    // 4. Giải mã seed_z (64-bit to 8-bit) và ghi vào 32 bytes cuối
+    uint8 z_bytes[32];
+    #pragma HLS ARRAY_PARTITION variable=z_bytes complete
+    for(int i=0; i<4; i++) {
+        #pragma HLS UNROLL
+        uint64_t w = seed_z[i];
+        for(int j=0; j<8; j++) z_bytes[i*8 + j] = (uint8)(w >> (j*8));
+    }
+    Pack_Z_into_SK: for(int i=0; i<32; i++) {
+        #pragma HLS PIPELINE II=1
+        sk_local[2368 + i] = z_bytes[i];
     }
 
     memcpy(sk_out, sk_local, SK_SIZE_BYTES);
