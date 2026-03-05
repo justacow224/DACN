@@ -31,38 +31,8 @@ import time
 
 # Try importing pynq - will only work on the actual FPGA board
 try:
-    from pynq import Overlay, allocate, Device
+    from pynq import Overlay, allocate
     PYNQ_AVAILABLE = True
-
-    # On Kria boards, PYNQ uses embedded devices (not XRT).
-    # The Kria-PYNQ install script sets up:
-    #   - /etc/xocl.txt (platform name)
-    #   - /etc/profile.d/pynq_venv.sh (env vars including XILINX_XRT=/usr)
-    #   - Device tree overlay (pynq.dtbo)
-    # If no devices are found, guide the user to install correctly.
-    if len(Device.devices) == 0:
-        import os
-        hints = []
-        if not os.path.exists("/etc/xocl.txt"):
-            hints.append("  - /etc/xocl.txt not found (Kria-PYNQ not installed)")
-        if not os.path.exists("/etc/profile.d/pynq_venv.sh"):
-            hints.append("  - /etc/profile.d/pynq_venv.sh not found")
-        if not os.environ.get("XILINX_XRT"):
-            hints.append("  - XILINX_XRT env var not set "
-                         "(run: source /etc/profile.d/pynq_venv.sh)")
-        if os.geteuid() != 0:
-            hints.append("  - Not running as root (use: sudo -E)")
-
-        print("[WARN] No PYNQ devices found.")
-        if hints:
-            print("Possible causes:")
-            print("\n".join(hints))
-        print("\nFix: Install Kria-PYNQ properly:")
-        print("  git clone https://github.com/Xilinx/Kria-PYNQ.git")
-        print("  cd Kria-PYNQ && sudo bash install.sh -b KR260")
-        print("  sudo reboot")
-        print("Then run: source /etc/profile.d/pynq_venv.sh")
-        print("     and: sudo -E python3 <your_script.py>")
 except ImportError:
     PYNQ_AVAILABLE = False
     print("[WARN] pynq not available. Running in simulation/offline mode.")
