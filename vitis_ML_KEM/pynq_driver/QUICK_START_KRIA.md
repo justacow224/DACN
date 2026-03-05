@@ -20,11 +20,19 @@ git clone <your-repo-url> DACN
 cd DACN
 ```
 
-## 3. Chạy demo
+## 3. Source XRT environment (bắt buộc)
 
 ```bash
-# Phải dùng sudo (PYNQ cần quyền root để program FPGA)
-sudo python3 vitis_ML_KEM/pynq_driver/ml_kem_driver.py vitis_ML_KEM/bitstream
+source /opt/xilinx/xrt/setup.sh
+```
+
+> Nếu file này không tồn tại, cài XRT: `sudo apt install -y xrt`
+
+## 4. Chạy demo
+
+```bash
+# Phải dùng sudo -E (PYNQ cần quyền root, -E giữ XRT env vars)
+sudo -E python3 vitis_ML_KEM/pynq_driver/ml_kem_driver.py vitis_ML_KEM/bitstream
 ```
 
 Output mong đợi:
@@ -48,7 +56,7 @@ ML-KEM 768 FPGA Accelerator Demo
 Shared secrets match: ✅ YES
 ```
 
-## 4. Dùng trong code Python
+## 5. Dùng trong code Python
 
 ```python
 from ml_kem_driver import MLKEMAccelerator
@@ -65,6 +73,7 @@ print(f"Match: {result['match']}")
 
 ## Lưu ý
 
-- **`sudo` là bắt buộc** — PYNQ truy cập `/dev/xdevcfg` hoặc `/sys/class/fpga_manager`
+- **`sudo -E` là bắt buộc** — PYNQ truy cập `/dev/xdevcfg` hoặc `/sys/class/fpga_manager`, `-E` giữ XRT env
+- **`source /opt/xilinx/xrt/setup.sh`** phải chạy trước — nếu thiếu sẽ gặp lỗi "No Devices Found"
 - Mỗi bước (keygen/encaps/decaps) sẽ **reload FPGA** vì dùng bitstream riêng
 - Board cần kết nối mạng để clone repo

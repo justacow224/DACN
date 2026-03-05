@@ -31,8 +31,22 @@ import time
 
 # Try importing pynq - will only work on the actual FPGA board
 try:
-    from pynq import Overlay, allocate
+    from pynq import Overlay, allocate, Device
     PYNQ_AVAILABLE = True
+
+    # On Kria boards, if no device is found automatically,
+    # try to discover via available servers (fpga_manager path).
+    if PYNQ_AVAILABLE and len(Device.devices) == 0:
+        print("[INFO] No XRT devices found. Trying Kria/Zynq fallback...")
+        try:
+            from pynq.pl_server.embedded_device import EmbeddedDevice
+            if len(EmbeddedDevice.devices) > 0:
+                print(f"[INFO] Found embedded device: {EmbeddedDevice.devices[0].name}")
+            else:
+                print("[WARN] No embedded devices found either. "
+                      "Make sure you run with sudo and XRT/firmware is set up.")
+        except (ImportError, Exception) as e:
+            print(f"[WARN] Embedded device fallback failed: {e}")
 except ImportError:
     PYNQ_AVAILABLE = False
     print("[WARN] pynq not available. Running in simulation/offline mode.")
