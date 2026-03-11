@@ -247,7 +247,7 @@ void ml_kem_encaps(
             xof_in[4] = (uint64_t)i | ((uint64_t)j << 8);
 
             hls::stream<uint8> strm;
-            #pragma HLS STREAM variable=strm depth=256
+            #pragma HLS STREAM variable=strm depth=2048
             
             // Buffer cục bộ cực nhỏ cho 1 đa thức A
             int16 A_poly_temp[256];

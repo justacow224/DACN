@@ -225,7 +225,7 @@ void ml_kem_decaps(
             xof_in[4] = (uint64_t)i | ((uint64_t)j << 8); // index j, i
             
             hls::stream<uint8> strm;
-            #pragma HLS STREAM variable=strm depth=256
+            #pragma HLS STREAM variable=strm depth=2048
             int16 A_ji[256];
             #pragma HLS ARRAY_PARTITION variable=A_ji cyclic factor=2
             

@@ -192,7 +192,7 @@ void ml_kem_keygen(
             xof_in[4] = (uint64_t)j | ((uint64_t)i << 8); 
 
             hls::stream<uint8> strm;
-            #pragma HLS STREAM variable=strm depth=256
+            #pragma HLS STREAM variable=strm depth=2048
             
             int16 A_poly_temp[256];
             #pragma HLS ARRAY_PARTITION variable=A_poly_temp cyclic factor=2
