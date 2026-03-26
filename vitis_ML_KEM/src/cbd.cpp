@@ -1,5 +1,6 @@
 #include "params.h"
 #include "ap_int.h"
+#include <stdint.h>
 
 // =========================================================
 // CBD Core (Eta = 2) - Optimized for Factor=2

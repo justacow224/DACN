@@ -1,6 +1,7 @@
 #include "params.h"
 #include "hls_stream.h"
 #include "ap_int.h"
+#include <stdint.h>
 
 // =========================================================
 // PHẦN 1: CÁC HẰNG SỐ VÀ HÀM HỖ TRỢ (VITIS STYLE)
