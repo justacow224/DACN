@@ -4,6 +4,7 @@
 #include <vector>
 #include <iomanip>
 #include "params.h"
+#include "ap_int.h"
 
 // Kích thước chuẩn cho Kyber-768
 #define PK_SIZE 1184 // 384*3 + 32
@@ -13,8 +14,8 @@
 void ml_kem_keygen(
     ap_uint<64> seed_d[4],
     ap_uint<64> seed_z[4],
-    uint8 pk_out[PK_SIZE],
-    uint8 sk_out[SK_HW_SIZE]
+    ap_uint<128> pk_out[74],
+    ap_uint<128> sk_out[150]
 );
 
 // --- HELPER FUNCTIONS ---
@@ -84,17 +85,34 @@ int main() {
             bytes_to_words(d_bytes, seed_d);
             bytes_to_words(z_bytes, seed_z);
 
-            // 2. Prepare Output
-            uint8 pk_hw[PK_SIZE];
-            uint8 sk_hw[SK_HW_SIZE];
+            // 2. Prepare Output Arrays (Hứng dữ liệu 128-bit từ phần cứng)
+            ap_uint<128> pk_out[74];
+            ap_uint<128> sk_out[150];
 
             // 3. Call Hardware
-            ml_kem_keygen(seed_d, seed_z, pk_hw, sk_hw);
+            ml_kem_keygen(seed_d, seed_z, pk_out, sk_out);
+
+            // 3.5 UNPACK: Giải nén 128-bit thành mảng 8-bit (byte) để so sánh
+            uint8_t pk_hw[PK_SIZE];
+            for(int i = 0; i < 74; i++) {
+                ap_uint<128> chunk = pk_out[i];
+                for(int j = 0; j < 16; j++) {
+                    pk_hw[i * 16 + j] = (uint8_t)chunk((j * 8) + 7, j * 8);
+                }
+            }
+
+            uint8_t sk_hw[2400]; // Khai báo đủ 2400 bytes để hứng hết 150 cục
+            for(int i = 0; i < 150; i++) {
+                ap_uint<128> chunk = sk_out[i];
+                for(int j = 0; j < 16; j++) {
+                    sk_hw[i * 16 + j] = (uint8_t)chunk((j * 8) + 7, j * 8);
+                }
+            }
 
             // 4. Verify Public Key (PK) - So khớp 100% (1184 bytes)
             bool pk_pass = true;
-            for(int i=0; i<PK_SIZE; i++) {
-                if((uint8_t)pk_hw[i] != pk_ref[i]) {
+            for(int i = 0; i < PK_SIZE; i++) {
+                if(pk_hw[i] != pk_ref[i]) {
                     // std::cout << "\nPK Mismatch at " << i 
                     //           << " HW=" << std::hex << (int)pk_hw[i] 
                     //           << " Ref=" << (int)pk_ref[i];
@@ -105,8 +123,8 @@ int main() {
 
             // 5. Verify Secret Key (SK) - So khớp phần đầu (1152 bytes)
             bool sk_pass = true;
-            for(int i=0; i<SK_HW_SIZE; i++) {
-                if((uint8_t)sk_hw[i] != sk_ref[i]) {
+            for(int i = 0; i < SK_HW_SIZE; i++) {
+                if(sk_hw[i] != sk_ref[i]) {
                     // std::cout << "\nSK Mismatch at " << i 
                     //           << " HW=" << std::hex << (int)sk_hw[i] 
                     //           << " Ref=" << (int)sk_ref[i];
@@ -115,6 +133,7 @@ int main() {
                 }
             }
 
+    // ---- KIỂM TRA VÀ IN KẾT QUẢ ----
             if (pk_pass && sk_pass) {
                 std::cout << "PASS" << std::endl;
                 pass_count++;
@@ -122,9 +141,8 @@ int main() {
                 std::cout << "FAIL" << std::endl;
                 if(!pk_pass) std::cout << "  -> PK Failed" << std::endl;
                 if(!sk_pass) std::cout << "  -> SK Failed (First " << SK_HW_SIZE << " bytes)" << std::endl;
-                // return 1; // Uncomment để dừng ngay khi lỗi
             }
-        }
+        } 
     }
 
     std::cout << "---------------------------------" << std::endl;

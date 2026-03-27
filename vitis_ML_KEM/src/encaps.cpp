@@ -2,6 +2,8 @@
 #include "hls_stream.h"
 #include "ap_int.h"
 #include <cstring>
+#include <stdint.h>
+
 
 // --- EXTERN DECLARATIONS ---
 extern void keccak_f1600(uint64_t state[25]);
