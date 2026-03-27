@@ -79,18 +79,22 @@ static void sha3_256_pk_encaps(uint8 input[1184], uint8 output[32]) {
 }
 
 #define PK_SIZE 1184
-#define CT_SIZE 1088 
+#define CT_SIZE 1088
+#define PK_SIZE_128  (PK_SIZE / 16)   // 74
+#define RAND_SIZE_128 (32 / 16)      // 2
+#define CT_SIZE_128  (CT_SIZE / 16)   // 68
+#define SS_SIZE_128  (32 / 16)       // 2
 
 void ml_kem_encaps(
-    uint8 pk_in[PK_SIZE],
-    uint8 randomness_m[32], 
-    uint8 ct_out[CT_SIZE],  
-    uint8 ss_out[32]   
+    ap_uint<128> pk_in[PK_SIZE_128],
+    ap_uint<128> randomness_m_in[RAND_SIZE_128],
+    ap_uint<128> ct_out[CT_SIZE_128],
+    ap_uint<128> ss_out[SS_SIZE_128]
 ) {
-    #pragma HLS INTERFACE m_axi port=pk_in bundle=gmem0 depth=1184 max_widen_bitwidth=128
-    #pragma HLS INTERFACE m_axi port=randomness_m bundle=gmem0 depth=32 max_widen_bitwidth=128
-    #pragma HLS INTERFACE m_axi port=ct_out bundle=gmem1 depth=1088 max_widen_bitwidth=128
-    #pragma HLS INTERFACE m_axi port=ss_out bundle=gmem1 depth=32 max_widen_bitwidth=128
+    #pragma HLS INTERFACE m_axi port=pk_in bundle=gmem0 depth=74
+    #pragma HLS INTERFACE m_axi port=randomness_m_in bundle=gmem0 depth=2
+    #pragma HLS INTERFACE m_axi port=ct_out bundle=gmem1 depth=68
+    #pragma HLS INTERFACE m_axi port=ss_out bundle=gmem1 depth=2
     #pragma HLS INTERFACE s_axilite port=return
 
     // Resource Allocation: Limit=3 is Sweet Spot
@@ -123,8 +127,26 @@ void ml_kem_encaps(
     uint8 ct_local[CT_SIZE];
     #pragma HLS ARRAY_PARTITION variable=ct_local block factor=3 
 
-    // --- EXECUTION ---
-    memcpy(pk_local, pk_in, PK_SIZE);
+    // --- UNPACK INPUTS (128-bit -> uint8) ---
+    // Unpack pk_in: 74 x ap_uint<128> -> 1184 bytes
+    Unpack_PK_In: for(int i = 0; i < PK_SIZE_128; i++) {
+        #pragma HLS PIPELINE II=1
+        ap_uint<128> chunk = pk_in[i];
+        for(int j = 0; j < 16; j++) {
+            pk_local[i*16 + j] = (uint8)chunk((j*8)+7, j*8);
+        }
+    }
+
+    // Unpack randomness_m: 2 x ap_uint<128> -> 32 bytes
+    uint8 randomness_m[32];
+    #pragma HLS ARRAY_PARTITION variable=randomness_m complete
+    Unpack_Rand_In: for(int i = 0; i < RAND_SIZE_128; i++) {
+        #pragma HLS PIPELINE II=1
+        ap_uint<128> chunk = randomness_m_in[i];
+        for(int j = 0; j < 16; j++) {
+            randomness_m[i*16 + j] = (uint8)chunk((j*8)+7, j*8);
+        }
+    }
 
     // 1. Hashing
     uint8 h_pk[32];
@@ -143,9 +165,12 @@ void ml_kem_encaps(
     #pragma HLS ARRAY_PARTITION variable=Kr complete
     sha3_512_64bytes_encaps(g_in, Kr);
     
+    // Store ss locally first, pack to 128-bit output at the end
+    uint8 ss_local[32];
+    #pragma HLS ARRAY_PARTITION variable=ss_local complete
     for(int i=0; i<32; i++) {
         #pragma HLS UNROLL
-        ss_out[i] = Kr[i];
+        ss_local[i] = Kr[i];
     }
 
     // Unpack PK
@@ -320,5 +345,24 @@ void ml_kem_encaps(
     }
     poly_compress_v(v_poly, &ct_local[KYBER_K*320]);
 
-    memcpy(ct_out, ct_local, CT_SIZE);
+    // --- PACK OUTPUTS (uint8 -> 128-bit) ---
+    // Pack ct_out: 1088 bytes -> 68 x ap_uint<128>
+    Pack_CT_Out: for(int i = 0; i < CT_SIZE_128; i++) {
+        #pragma HLS PIPELINE II=1
+        ap_uint<128> chunk = 0;
+        for(int j = 0; j < 16; j++) {
+            chunk((j*8)+7, j*8) = ct_local[i*16 + j];
+        }
+        ct_out[i] = chunk;
+    }
+
+    // Pack ss_out: 32 bytes -> 2 x ap_uint<128>
+    Pack_SS_Out: for(int i = 0; i < SS_SIZE_128; i++) {
+        #pragma HLS PIPELINE II=1
+        ap_uint<128> chunk = 0;
+        for(int j = 0; j < 16; j++) {
+            chunk((j*8)+7, j*8) = ss_local[i*16 + j];
+        }
+        ss_out[i] = chunk;
+    }
 }

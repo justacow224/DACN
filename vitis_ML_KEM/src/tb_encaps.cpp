@@ -5,20 +5,49 @@
 #include <iomanip>
 #include <cstring>
 #include "params.h"
+#include "ap_int.h"
 
 // Kích thước chuẩn cho Kyber-768
 #define PK_SIZE 1184
 #define CT_SIZE 1088
 #define SS_SIZE 32
 #define MSG_SIZE 32
+#define PK_SIZE_128  (PK_SIZE / 16)   // 74
+#define RAND_SIZE_128 (32 / 16)      // 2
+#define CT_SIZE_128  (CT_SIZE / 16)   // 68
+#define SS_SIZE_128  (32 / 16)       // 2
 
 // Khai báo DUT (Device Under Test)
 void ml_kem_encaps(
-    uint8 pk_in[PK_SIZE],
-    uint8 randomness_m[32],
-    uint8 ct_out[CT_SIZE],
-    uint8 ss_out[SS_SIZE]
+    ap_uint<128> pk_in[PK_SIZE_128],
+    ap_uint<128> randomness_m_in[RAND_SIZE_128],
+    ap_uint<128> ct_out[CT_SIZE_128],
+    ap_uint<128> ss_out[SS_SIZE_128]
 );
+
+// --- PACK / UNPACK HELPERS ---
+// Pack N bytes (uint8) -> ap_uint<128> array
+void pack_to_128(uint8* src, ap_uint<128>* dst, int num_bytes) {
+    int num_chunks = num_bytes / 16;
+    for (int i = 0; i < num_chunks; i++) {
+        ap_uint<128> chunk = 0;
+        for (int j = 0; j < 16; j++) {
+            chunk((j*8)+7, j*8) = src[i*16 + j];
+        }
+        dst[i] = chunk;
+    }
+}
+
+// Unpack ap_uint<128> array -> N bytes (uint8)
+void unpack_from_128(ap_uint<128>* src, uint8* dst, int num_bytes) {
+    int num_chunks = num_bytes / 16;
+    for (int i = 0; i < num_chunks; i++) {
+        ap_uint<128> chunk = src[i];
+        for (int j = 0; j < 16; j++) {
+            dst[i*16 + j] = (uint8)chunk((j*8)+7, j*8);
+        }
+    }
+}
 
 // --- CÁC HÀM HỖ TRỢ ---
 
@@ -101,21 +130,34 @@ int main() {
         // KHI ĐÃ ĐỦ DỮ LIỆU -> CHẠY TEST NGAY
         if (has_pk && has_msg && has_ct && has_ss) {
             
-            // 1. Prepare Buffers
-            uint8 pk_in[PK_SIZE];
-            uint8 m_in[MSG_SIZE];
+            // 1. Prepare flat uint8 buffers for KAT data
+            uint8 pk_flat[PK_SIZE];
+            uint8 m_flat[MSG_SIZE];
             uint8 ct_hw[CT_SIZE];
             uint8 ss_hw[SS_SIZE];
 
             // Copy vector sang array (Check size để an toàn)
             if (pk_vec.size() == PK_SIZE && msg_vec.size() == MSG_SIZE) {
-                memcpy(pk_in, pk_vec.data(), PK_SIZE);
-                memcpy(m_in, msg_vec.data(), MSG_SIZE);
+                memcpy(pk_flat, pk_vec.data(), PK_SIZE);
+                memcpy(m_flat, msg_vec.data(), MSG_SIZE);
+
+                // Pack uint8 -> ap_uint<128> for DUT
+                ap_uint<128> pk_128[PK_SIZE_128];
+                ap_uint<128> m_128[RAND_SIZE_128];
+                ap_uint<128> ct_128[CT_SIZE_128];
+                ap_uint<128> ss_128[SS_SIZE_128];
+
+                pack_to_128(pk_flat, pk_128, PK_SIZE);
+                pack_to_128(m_flat, m_128, MSG_SIZE);
 
                 // 2. Call Hardware
-                ml_kem_encaps(pk_in, m_in, ct_hw, ss_hw);
+                ml_kem_encaps(pk_128, m_128, ct_128, ss_128);
 
-                // 3. Verify
+                // 3. Unpack ap_uint<128> -> uint8 for verification
+                unpack_from_128(ct_128, ct_hw, CT_SIZE);
+                unpack_from_128(ss_128, ss_hw, SS_SIZE);
+
+                // 4. Verify
                 bool p1 = verify_bytes(ct_hw, ct_vec, CT_SIZE, "Ciphertext");
                 bool p2 = verify_bytes(ss_hw, ss_vec, SS_SIZE, "SharedSecret");
 
