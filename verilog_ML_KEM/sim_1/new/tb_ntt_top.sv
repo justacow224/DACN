@@ -30,9 +30,29 @@ module tb_ntt_top();
     );
 
     // =========================================================
-    // 3. CLOCK GENERATION (100MHz)
+    // 3. CLOCK GENERATION (100MHz) & PERFORMANCE COUNTER
     // =========================================================
     always #5 clk = ~clk;
+
+    // --- NEW: PERFORMANCE COUNTER ---
+    integer cycle_count;
+    logic   is_running;
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            cycle_count <= 0;
+            is_running  <= 0;
+        end else begin
+            if (start) begin
+                cycle_count <= 0;
+                is_running  <= 1;
+            end else if (done) begin
+                is_running  <= 0;
+            end else if (is_running) begin
+                cycle_count <= cycle_count + 1;
+            end
+        end
+    end
 
     // =========================================================
     // 4. TEST VECTORS (SYSTEMVERILOG 2D ARRAYS)
@@ -102,20 +122,13 @@ module tb_ntt_top();
             wait(done);
             @(negedge clk);
             
-            // Phase 4: Validate Results (Safe Synchronous Read)
+            // Phase 4: Validate Results & Report Performance
             errors = 0;
             
             for (i = 0; i < 256; i = i + 1) begin
-                // Bước 1: Cấp địa chỉ cho RAM
                 host_addr = i;
-                
-                // Bước 2: Chờ 1 nhịp clock để RAM đồng bộ (BRAM tốn 1 cycle để đọc)
                 @(posedge clk);
-                
-                // Bước 3: Đợi chốt dữ liệu ở sườn âm cho an toàn
                 @(negedge clk); 
-                
-                // Bước 4: So sánh
                 if (host_dout !== EXPECTED_NTT[tc][i]) begin
                     $display("   [ERROR] Mismatch at index %0d: Expected %0d, Got %0d", i, EXPECTED_NTT[tc][i], host_dout);
                     errors = errors + 1;
@@ -124,9 +137,10 @@ module tb_ntt_top();
 
             if (errors == 0) begin
                 $display(">> [SUCCESS] Testcase %0d PASSED 100%%!", tc + 1);
+                $display(">> [PERFORMANCE] NTT completed in %0d clock cycles.", cycle_count);
             end else begin
                 $display(">> [FAILED] Testcase %0d had %0d errors.", tc + 1, errors);
-                $finish; // Stop simulation on first failure
+                $finish;
             end
         end
 
