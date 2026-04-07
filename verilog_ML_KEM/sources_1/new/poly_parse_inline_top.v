@@ -120,13 +120,18 @@ module poly_parse_inline_top (
                         end
                     end 
                     else if (valid_d1 && space_for_1) begin
+                        // Nếu d1 hợp lệ, ta ghi nó vào đâu?
                         if (coeff_count[0] == 1'b0) begin
+                        // Trường hợp 1: Tổng số hệ số đã nhận đang là số CHẴN (0, 2, 4...)
+                        // -> Chỗ trống tiếp theo thuộc về Bank A0
                             ram_we_a0   <= 1; ram_a0_din <= {4'd0, d1};
                             coeff_count <= coeff_count + 1;
                         end else begin
+                        // Trường hợp 2: Tổng số hệ số đã nhận đang là số LẺ (1, 3, 5...)
+                        // -> Bank A0 đã bị chiếm, d1 phải bị đẩy sang Bank A1
                             ram_we_a1   <= 1; ram_a1_din <= {4'd0, d1};
                             coeff_count <= coeff_count + 1;
-                            ram_addr    <= ram_addr + 1; 
+                            ram_addr    <= ram_addr + 1;    // ĐÃ GHI ĐỦ 1 CẶP CHẴN/LẺ -> TĂNG ĐỊA CHỈ!
                         end
                     end
                     else if (valid_d2 && space_for_1) begin

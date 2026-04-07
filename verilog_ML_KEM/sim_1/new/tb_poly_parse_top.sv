@@ -132,9 +132,9 @@ module tb_poly_parse_top();
             rejected_count = 0;
 
             // 3. Trigger DUT
-            @(posedge clk);
+            @(negedge clk);
             start = 1;
-            @(posedge clk);
+            @(negedge clk);
             start = 0;
 
             // 4. Wait for completion
@@ -143,15 +143,16 @@ module tb_poly_parse_top();
 
             // 5. Reporting
             if (valid_coeff_written == 256) begin
-                $display("   [SUCCESS] Exactly 256 valid coefficients written.");
-                $display("   [PERFORMANCE] Completed in %0d clock cycles.", cycle_count);
+                $display(">> [SUCCESS] Exactly 256 valid coefficients written.");
+                $display("   [PERFORMANCE] Completed in %0d clock cycles. (Theory: ~200-280, varies by reject rate)", cycle_count);
             end else begin
-                $display("   [ERROR] Expected 256 coefficients, but wrote %0d.", valid_coeff_written);
+                $display(">> [FAILED] Expected 256 coefficients, but wrote %0d.", valid_coeff_written);
+                $finish;
             end
         end
 
         $display("=================================================");
-        $display("               SIMULATION COMPLETED              ");
+        $display("   ALL 5 TESTCASES PASSED! SIMULATION COMPLETED  ");
         $display("=================================================");
         #50;
         $finish;

@@ -5,16 +5,16 @@ module tb_poly_pointwise_top();
     // =========================================================
     // 1. SIGNAL DECLARATIONS
     // =========================================================
-    logic         clk;
-    logic         rst_n;
-    logic         start;
-    logic         done;
+    logic         clk;              
+    logic         rst_n;            // active low
+    logic         start;            // Start the computation
+    logic         done;             // Done signal
 
-    logic         host_sel;
-    logic         host_we;
-    logic [7:0]   host_addr;
-    logic [15:0]  host_din;
-    logic [15:0]  host_dout;
+    logic         host_sel;         // Select bank: 0 = RAM A (input/output), 1 = RAM B (input only)
+    logic         host_we;          // flag: 1 = write to BRAM, 0 = don't write
+    logic [7:0]   host_addr;        // Address of BRAM that host wants to access (0–255)
+    logic [15:0]  host_din;         // Data host write to BRAM
+    logic [15:0]  host_dout;        // Data host read from BRAM
 
     // =========================================================
     // 2. DEVICE UNDER TEST (DUT)

@@ -177,7 +177,7 @@ module tb_keccak_f1600_core();
             wait(done);
             @(negedge clk);
 
-            $display("   [PERFORMANCE] Keccak permutation took %0d clock cycles.", cycle_count);
+            $display("   [PERFORMANCE] Keccak permutation took %0d clock cycles. (Theory: 1 load + 24 rounds = ~24)", cycle_count);
 
             // Verification
             if (state_out === golden_out) begin

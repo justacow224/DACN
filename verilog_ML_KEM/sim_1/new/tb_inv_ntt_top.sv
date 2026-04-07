@@ -121,7 +121,7 @@ module tb_inv_ntt_top();
             wait(done);
             @(negedge clk);
             
-            $display("   [PERFORMANCE] InvNTT took %0d clock cycles.", cycle_count);
+            $display("   [PERFORMANCE] InvNTT took %0d clock cycles. (Theory: 7*128 + 256 + FLUSH = ~1159)", cycle_count);
 
             // Phase 4: Validate
             errors = 0;

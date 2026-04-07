@@ -135,7 +135,7 @@ module tb_poly_add_sub_top();
 
         wait(done);
         @(negedge clk);
-        $display("   [PERFORMANCE] Addition took %0d clock cycles.", cycle_count);
+        $display("   [PERFORMANCE] Addition took %0d clock cycles. (Theory: 128 + FLUSH = ~131)", cycle_count);
 
         // Verify ADD Results
         errors = 0;
@@ -149,7 +149,12 @@ module tb_poly_add_sub_top();
                 errors = errors + 1;
             end
         end
-        if (errors == 0) $display(">> [SUCCESS] POLY ADDITION PASSED 100%%!");
+        if (errors == 0) begin
+            $display(">> [SUCCESS] POLY ADDITION PASSED 100%%!");
+        end else begin
+            $display(">> [FAILED] POLY ADDITION had %0d errors.", errors);
+            $finish;
+        end
 
 
         // ---------------------------------------------------------
@@ -178,7 +183,7 @@ module tb_poly_add_sub_top();
 
         wait(done);
         @(negedge clk);
-        $display("   [PERFORMANCE] Subtraction took %0d clock cycles.", cycle_count);
+        $display("   [PERFORMANCE] Subtraction took %0d clock cycles. (Theory: 128 + FLUSH = ~131)", cycle_count);
 
         // Verify SUB Results
         errors = 0;
@@ -192,7 +197,12 @@ module tb_poly_add_sub_top();
                 errors = errors + 1;
             end
         end
-        if (errors == 0) $display(">> [SUCCESS] POLY SUBTRACTION PASSED 100%%!");
+        if (errors == 0) begin
+            $display(">> [SUCCESS] POLY SUBTRACTION PASSED 100%%!");
+        end else begin
+            $display(">> [FAILED] POLY SUBTRACTION had %0d errors.", errors);
+            $finish;
+        end
 
         $display("=================================================");
         $display("   ALL TESTCASES PASSED FLAWLESSLY! CONGRATS!    ");

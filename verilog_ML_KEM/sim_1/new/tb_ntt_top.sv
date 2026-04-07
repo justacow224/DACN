@@ -137,7 +137,7 @@ module tb_ntt_top();
 
             if (errors == 0) begin
                 $display(">> [SUCCESS] Testcase %0d PASSED 100%%!", tc + 1);
-                $display(">> [PERFORMANCE] NTT completed in %0d clock cycles.", cycle_count);
+                $display(">> [PERFORMANCE] NTT completed in %0d clock cycles. (Theory: 7*128 + FLUSH = ~903)", cycle_count);
             end else begin
                 $display(">> [FAILED] Testcase %0d had %0d errors.", tc + 1, errors);
                 $finish;

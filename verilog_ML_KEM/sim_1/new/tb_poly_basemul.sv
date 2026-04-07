@@ -51,6 +51,8 @@ module tb_poly_basemul();
     // =========================================================
     // 5. STIMULUS PROCESS
     // =========================================================
+    integer errors = 0;
+
     initial begin
         // Initialize inputs
         clk   = 0;
@@ -113,17 +115,33 @@ module tb_poly_basemul();
         // Check Test 1 Result (Cycle 10)
         @(negedge clk); 
         $display("[CYCLE %0d] TEST 1: c0 = %0d (Exp: 370)  | c1 = %0d (Exp: 3250)", cycle_count, c0_out, c1_out);
+        if (c0_out !== 16'd370 || c1_out !== 16'd3250) begin
+            $display("   -> [ERROR] Test 1 Failed!");
+            errors = errors + 1;
+        end
 
         // Check Test 2 Result (Cycle 11)
         @(negedge clk); 
         $display("[CYCLE %0d] TEST 2: c0 = %0d (Exp: 0)    | c1 = %0d (Exp: 2)", cycle_count, c0_out, c1_out);
+        if (c0_out !== 16'd0 || c1_out !== 16'd2) begin
+            $display("   -> [ERROR] Test 2 Failed!");
+            errors = errors + 1;
+        end
 
         // Check Test 3 Result (Cycle 12)
         @(negedge clk); 
         $display("[CYCLE %0d] TEST 3: c0 = %0d (Exp: 3278) | c1 = %0d (Exp: 2)", cycle_count, c0_out, c1_out);
+        if (c0_out !== 16'd3278 || c1_out !== 16'd2) begin
+            $display("   -> [ERROR] Test 3 Failed!");
+            errors = errors + 1;
+        end
 
         $display("=================================================");
-        $display("             SIMULATION COMPLETED                ");
+        if (errors == 0) begin
+            $display(">> [SUCCESS] SIMULATION COMPLETED - ALL PASSED! <<");
+        end else begin
+            $display(">> [FAILED] SIMULATION COMPLETED - %0d ERRORS! <<", errors);
+        end
         $display("=================================================");
         
         #20;

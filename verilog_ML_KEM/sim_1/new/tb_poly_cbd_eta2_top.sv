@@ -144,7 +144,7 @@ module tb_poly_cbd_eta2_top();
             wait(done);
             @(negedge clk);
 
-            $display("   [PERFORMANCE] CBD took %0d clock cycles.", cycle_count);
+            $display("   [PERFORMANCE] CBD took %0d clock cycles. (Theory: 16 words * (1 read + 8 process) = ~145)", cycle_count);
 
             // Verification
             errors = 0;

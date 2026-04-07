@@ -30,6 +30,8 @@ module tb_butterfly();
     always #5 clk = ~clk;
 
     // Tiến trình nạp dữ liệu (Stimulus)
+    integer errors = 0;
+
     initial begin
         // 1. Khởi tạo trạng thái ban đầu
         clk   = 0;
@@ -88,17 +90,33 @@ module tb_butterfly();
         @(negedge clk); // Clock 5
         @(negedge clk); // Clock 6 -> Kết quả Test 1 xuất hiện
         $display("[TEST 1] a'= %0d (Chuan: 169)  | b'= %0d (Chuan: 1831)", a_prime, b_prime);
+        if (a_prime !== 16'd169 || b_prime !== 16'd1831) begin
+            $display("   -> [ERROR] Test 1 Failed!");
+            errors = errors + 1;
+        end
 
         // Chu kỳ tiếp theo là kết quả của Test 2
         @(negedge clk); // Clock 7
         $display("[TEST 2] a'= %0d (Chuan: 3327) | b'= %0d (Chuan: 0)", a_prime, b_prime);
+        if (a_prime !== 16'd3327 || b_prime !== 16'd0) begin
+            $display("   -> [ERROR] Test 2 Failed!");
+            errors = errors + 1;
+        end
 
         // Chu kỳ tiếp theo là kết quả của Test 3
         @(negedge clk); // Clock 8
         $display("[TEST 3] a'= %0d (Chuan: 1729) | b'= %0d (Chuan: 1600)", a_prime, b_prime);
+        if (a_prime !== 16'd1729 || b_prime !== 16'd1600) begin
+            $display("   -> [ERROR] Test 3 Failed!");
+            errors = errors + 1;
+        end
 
         $display("=================================================");
-        $display("            MO PHONG HOAN TAT                    ");
+        if (errors == 0) begin
+            $display(">> [SUCCESS] MO PHONG HOAN TAT - ALL PASSED! <<");
+        end else begin
+            $display(">> [FAILED] MO PHONG HOAN TAT - %0d ERRORS! <<", errors);
+        end
         $display("=================================================");
         
         // Dừng mô phỏng

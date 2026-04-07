@@ -38,6 +38,8 @@ module tb_invntt_butterfly();
     // =========================================================
     // 4. STIMULUS PROCESS
     // =========================================================
+    integer errors = 0;
+
     initial begin
         // Initialize inputs
         clk      = 0;
@@ -78,7 +80,8 @@ module tb_invntt_butterfly();
         // ---------------------------------------------------------
         // CLOCK 3: Inject Test Vector 3 (Minimum / Underflow Case)
         // GS Math: a' = (0 + 1) % 3329 = 1
-        //          b' = ((0 - 1) % 3329 * 1729) % 3329 
+        //          b' = ((0 - 1) % 3329 * 1729) % 3329
+        //             = (0 - 1 + 3329 * 1729) % 3329
         //             = (3328 * 1729) % 3329 = 1600
         // ---------------------------------------------------------
         @(negedge clk);
@@ -95,17 +98,33 @@ module tb_invntt_butterfly();
         @(negedge clk); // Clock 5
         @(negedge clk); // Clock 6 -> Test 1 output is ready
         $display("[TEST 1] a'= %0d (Expected: 3000) | b'= %0d (Expected: 2080)", a_prime, b_prime);
+        if (a_prime !== 16'd3000 || b_prime !== 16'd2080) begin
+            $display("   -> [ERROR] Test 1 Failed!");
+            errors = errors + 1;
+        end
 
         // Next cycle: Test 2 results
         @(negedge clk); // Clock 7
         $display("[TEST 2] a'= %0d (Expected: 3327) | b'= %0d (Expected: 0)", a_prime, b_prime);
+        if (a_prime !== 16'd3327 || b_prime !== 16'd0) begin
+            $display("   -> [ERROR] Test 2 Failed!");
+            errors = errors + 1;
+        end
 
         // Next cycle: Test 3 results
         @(negedge clk); // Clock 8
         $display("[TEST 3] a'= %0d (Expected: 1)    | b'= %0d (Expected: 1600)", a_prime, b_prime);
+        if (a_prime !== 16'd1 || b_prime !== 16'd1600) begin
+            $display("   -> [ERROR] Test 3 Failed!");
+            errors = errors + 1;
+        end
 
         $display("=================================================");
-        $display("             SIMULATION COMPLETED                ");
+        if (errors == 0) begin
+            $display(">> [SUCCESS] SIMULATION COMPLETED - ALL PASSED! <<");
+        end else begin
+            $display(">> [FAILED] SIMULATION COMPLETED - %0d ERRORS! <<", errors);
+        end
         $display("=================================================");
         
         // End simulation
