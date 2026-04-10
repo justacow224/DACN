@@ -34,12 +34,12 @@ module poly_basemul (
 
     // Delay 'gamma' by 4 cycles so it arrives perfectly in sync with term2_w
     reg [11:0] gamma_d [0:3];
-    integer i;
+    integer i_gamma;
     always @(posedge clk) begin
         if (en) begin
             gamma_d[0] <= gamma[11:0];
-            for (i = 1; i < 4; i = i + 1) begin
-                gamma_d[i] <= gamma_d[i-1];
+            for (i_gamma = 1; i_gamma < 4; i_gamma = i_gamma + 1) begin
+                gamma_d[i_gamma] <= gamma_d[i_gamma-1];
             end
         end
     end
@@ -65,16 +65,17 @@ module poly_basemul (
     reg [11:0] term4_d [0:3];
     reg [11:0] term5_d [0:3];
     
+    integer i_term;
     always @(posedge clk) begin
         if (en) begin
             term1_d[0] <= term1_w[11:0];
             term4_d[0] <= term4_w[11:0];
             term5_d[0] <= term5_w[11:0];
             
-            for (i = 1; i < 4; i = i + 1) begin
-                term1_d[i] <= term1_d[i-1];
-                term4_d[i] <= term4_d[i-1];
-                term5_d[i] <= term5_d[i-1];
+            for (i_term = 1; i_term < 4; i_term = i_term + 1) begin
+                term1_d[i_term] <= term1_d[i_term-1];
+                term4_d[i_term] <= term4_d[i_term-1];
+                term5_d[i_term] <= term5_d[i_term-1];
             end
         end
     end

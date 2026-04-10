@@ -213,7 +213,12 @@ module inv_ntt_top (
     wire       sys_ram1_we    = (state == IDLE) ? (host_we & (host_bank == 1'b1)) : ram1_we;
     wire [15:0]sys_ram1_din   = (state == IDLE) ? host_din : ram1_din;
 
-    assign host_dout = (host_bank == 1'b0) ? ram0_dout : ram1_dout;
+    reg host_bank_reg;
+    always @(posedge clk) begin
+        if (!rst_n) host_bank_reg <= 0;
+        else host_bank_reg <= host_bank;
+    end
+    assign host_dout = (host_bank_reg == 1'b0) ? ram0_dout : ram1_dout;
 
     // =================================================================
     // 7. DUAL-PORT BRAM INFERENCE

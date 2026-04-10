@@ -162,8 +162,18 @@ module poly_pointwise_top (
     wire       sys_ram_b0_we  = (state == IDLE) ? (host_we & (host_sel == 1'b1) & (host_bank == 1'b0)) : 1'b0;
     wire       sys_ram_b1_we  = (state == IDLE) ? (host_we & (host_sel == 1'b1) & (host_bank == 1'b1)) : 1'b0;
 
-    assign host_dout = (host_sel == 1'b0) ? ((host_bank == 1'b0) ? ram_a0_dout : ram_a1_dout) : 
-                                            ((host_bank == 1'b0) ? ram_b0_dout : ram_b1_dout);
+    reg host_bank_reg, host_sel_reg;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            host_bank_reg <= 0;
+            host_sel_reg <= 0;
+        end else begin
+            host_bank_reg <= host_bank;
+            host_sel_reg <= host_sel;
+        end
+    end
+    assign host_dout = (host_sel_reg == 1'b0) ? ((host_bank_reg == 1'b0) ? ram_a0_dout : ram_a1_dout) : 
+                                                ((host_bank_reg == 1'b0) ? ram_b0_dout : ram_b1_dout);
 
     // RAM A (Accumulator / Output)
     reg [15:0] BRAM_A_0 [0:127];
