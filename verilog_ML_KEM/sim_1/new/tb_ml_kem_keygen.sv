@@ -2,6 +2,7 @@
 
 module tb_ml_kem_keygen();
     localparam bit DEBUG_VERBOSE = 1'b0;
+    localparam int KEYGEN_TIMEOUT_CYCLES = 500000;
 
     // Clock and Reset
     reg clk;
@@ -48,6 +49,18 @@ module tb_ml_kem_keygen();
     always @(posedge clk) begin
         if (pk_we) pk_mem[pk_addr] <= pk_dout;
         if (sk_we) sk_mem[sk_addr] <= sk_dout;
+    end
+
+    // Basic protocol/range guards: catch invalid write addressing early
+    always @(posedge clk) begin
+        if (pk_we && (pk_addr >= 11'd1184)) begin
+            $display("ERROR: pk_addr out of range: %0d", pk_addr);
+            $fatal(1);
+        end
+        if (sk_we && (sk_addr >= 12'd2400)) begin
+            $display("ERROR: sk_addr out of range: %0d", sk_addr);
+            $fatal(1);
+        end
     end
     
     // Expected memories
@@ -186,6 +199,46 @@ module tb_ml_kem_keygen();
 
     int n, j, tmp, idx95, idx99;
 
+    task automatic reset_and_clear_dut();
+        int t;
+        begin
+            rst_n = 0;
+            repeat (2) @(posedge clk);
+            rst_n = 1;
+            @(posedge clk);
+
+            for (t = 0; t < 1184; t++) pk_mem[t] = 8'h00;
+            for (t = 0; t < 2400; t++) sk_mem[t] = 8'h00;
+        end
+    endtask
+
+    task automatic run_keygen_with_timeout(input string tag, output int cycles_out);
+        int watchdog;
+        begin
+            $display("Starting %s...", tag);
+
+            @(posedge clk);
+            start = 1;
+            @(posedge clk);
+            start = 0;
+
+            cycles_out = 0;
+            watchdog = 0;
+            while (!done && watchdog < KEYGEN_TIMEOUT_CYCLES) begin
+                @(posedge clk);
+                cycles_out++;
+                watchdog++;
+            end
+
+            if (!done) begin
+                $display("ERROR: TIMEOUT in %s after %0d cycles", tag, watchdog);
+                $fatal(1);
+            end
+
+            $display("%s Done in %0d cycles.", tag, cycles_out);
+        end
+    endtask
+
 
     initial begin
         clk = 0;
@@ -249,30 +302,9 @@ module tb_ml_kem_keygen();
                 end
                 kat_count = kat_count + 1;
 
-                // Clear capture memories before each run
-                for (i = 0; i < 1184; i++) pk_mem[i] = 8'h00;
-                for (i = 0; i < 2400; i++) sk_mem[i] = 8'h00;
-
-                // Re-initialize DUT state for each KAT
-                rst_n = 0;
-                repeat (2) @(posedge clk);
-                rst_n = 1;
-                @(posedge clk);
-
-                $display("Starting KeyGen KAT #%0d...", kat_count);
-                 
-                @(posedge clk);
-                start = 1;
-                @(posedge clk);
-                start = 0;
-                 
-                cycle_count = 0;
-                while (!done) begin
-                    @(posedge clk);
-                    cycle_count++;
-                end
-                
-                $display("KeyGen Done in %0d cycles.", cycle_count);
+                // Re-initialize DUT and clear captures before each KAT run
+                reset_and_clear_dut();
+                run_keygen_with_timeout($sformatf("KeyGen KAT #%0d", kat_count), cycle_count);
 
                 if (kat_count > MAX_KAT_STATS) begin
                     $display("ERROR: MAX_KAT_STATS=%0d is too small", MAX_KAT_STATS);
@@ -365,6 +397,24 @@ module tb_ml_kem_keygen();
         $display("median = %0.2f", cycle_median);
         $display("p95    = %0d", p95_cycles);
         $display("p99    = %0d", p99_cycles);
+
+        // -------- Directed boundary tests (integration-level) --------
+        $display("=== DIRECTED BOUNDARY TESTS ===");
+
+        // Boundary 1: all-zero seeds
+        seed_d = 256'h0;
+        seed_z = 256'h0;
+        reset_and_clear_dut();
+        run_keygen_with_timeout("Boundary all-zero seeds", cycle_count);
+        $display("Boundary all-zero seeds: PASSED");
+
+        // Boundary 2: all-0xFF seeds
+        seed_d = {256{1'b1}};
+        seed_z = {256{1'b1}};
+        reset_and_clear_dut();
+        run_keygen_with_timeout("Boundary all-FF seeds", cycle_count);
+        $display("Boundary all-FF seeds: PASSED");
+
         $finish;
     end
 endmodule
