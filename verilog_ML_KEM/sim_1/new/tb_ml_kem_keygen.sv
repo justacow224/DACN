@@ -54,13 +54,102 @@ module tb_ml_kem_keygen();
     reg [7:0] expected_sk [0:2399];
     
     logic pk_fail;
+
+    // -----------------------------------------------------------------
+    // Deep debug: pump + parse + pw + add
+    // -----------------------------------------------------------------
+    // Ghi chú cơ chế hoạt động:
+    // - pump: Cơ chế điều hướng dữ liệu (Routing/Memory Interface) trỏ giữa các S, E, RAM_A, B...
+    // - parse: (Poly Parse Inline Top) Mạch tiêu thụ dòng byte ngẫu nhiên từ XOF (SHAKE128/256), loại bỏ các giá trị >= 3329 và gom thành các hệ số nguyên để tạo đa thức trong vành R_q.
+    // - pw: Mạch nhân từng thành phần đa thức (Point-Wise Multiplication).
+    // - add: Mạch cộng và tích lũy (Accumulation).
     always @(posedge clk) begin
-        if (pk_we && pk_addr < 2 && pk_dout === 8'hxx) begin
-            $display("[DEBUG] Writing to pk_mem[%0d] = %h", pk_addr, pk_dout);
+        if (pk_we && pk_addr < 4) begin
+            $display("[PK_WR] addr=%0d data=%02h t=%0t", pk_addr, pk_dout, $time);
         end
-        if (dut.state == 33 && dut.pump_cnt < 3) begin // S_PUMP=33
-            $display("[PUMP] src=%0d, dst=%0d, i=%0d, j=%0d, addr=%0d, data=%h", 
-                dut.pump_src_sel, dut.pump_dst_sel, dut.i_idx, dut.j_idx, dut.pump_rd_addr, dut.pump_read_data);
+        if (sk_we && sk_addr >= 12'd2336 && sk_addr < 12'd2344) begin
+            $display("[SK_WR_HPK] addr=%0d data=%02h t=%0t", sk_addr, sk_dout, $time);
+        end
+
+        if (dut.state == 33 && dut.pump_cnt < 4) begin // S_PUMP = 33
+            $display("[PUMP] src=%0d dst=%0d i=%0d j=%0d rd=%0d wr=%0d we=%0b data=%h t=%0t",
+                dut.pump_src_sel, dut.pump_dst_sel,
+                dut.i_idx, dut.j_idx,
+                dut.pump_rd_addr, dut.pump_wr_addr,
+                dut.pump_we, dut.pump_read_data, $time);
+        end
+
+        if (dut.init_keccak) begin
+            $display("[KECCAK_INIT] hash_type=%0d i=%0d j=%0d state=%0d t=%0t",
+                dut.hash_type, dut.i_idx, dut.j_idx, dut.state, $time);
+        end
+
+        if (dut.finalize_keccak) begin
+            $display("[KECCAK_FINAL] hash_type=%0d i=%0d j=%0d state=%0d t=%0t",
+                dut.hash_type, dut.i_idx, dut.j_idx, dut.state, $time);
+        end
+
+        if (dut.parse_start) begin
+            $display("[PARSE_START] i=%0d j=%0d state=%0d t=%0t",
+                dut.i_idx, dut.j_idx, dut.state, $time);
+        end
+
+        if (dut.k_dout_valid && dut.parse_k_dout_ready) begin
+            $display("[SHAKE_BYTE] i=%0d j=%0d byte=%02h t=%0t",
+                dut.i_idx, dut.j_idx, dut.k_dout, $time);
+        end
+
+        if (dut.parse_ram_we_a0 || dut.parse_ram_we_a1) begin
+            $display("[PARSE_WR] i=%0d j=%0d addr=%0d we0=%0b d0=%h we1=%0b d1=%h t=%0t",
+                dut.i_idx, dut.j_idx,
+                dut.parse_ram_addr,
+                dut.parse_ram_we_a0, dut.parse_ram_a0_din,
+                dut.parse_ram_we_a1, dut.parse_ram_a1_din,
+                $time);
+        end
+
+        if (dut.parse_done) begin
+            $display("[PARSE_DONE] i=%0d j=%0d t=%0t",
+                dut.i_idx, dut.j_idx, $time);
+        end
+
+        if (dut.pw_start) begin
+            $display("[PW_START] i=%0d j=%0d t=%0t", dut.i_idx, dut.j_idx, $time);
+            if (dut.i_idx == 0 && dut.j_idx == 0) begin
+                $display("[PW_IN_MEM] A0=%h A1=%h B0=%h B1=%h t=%0t",
+                    dut.u_pw.BRAM_A_0[0], dut.u_pw.BRAM_A_1[0],
+                    dut.u_pw.BRAM_B_0[0], dut.u_pw.BRAM_B_1[0], $time);
+            end
+        end
+
+        if (dut.pw_done) begin
+            $display("[PW_DONE] i=%0d j=%0d t=%0t", dut.i_idx, dut.j_idx, $time);
+            if (dut.i_idx == 0 && dut.j_idx == 0) begin
+                $display("[PW_OUT_MEM] O0=%h O1=%h t=%0t",
+                    dut.u_pw.BRAM_A_0[0], dut.u_pw.BRAM_A_1[0], $time);
+            end
+        end
+
+        if (dut.add_start) begin
+            $display("[ADD_START] i=%0d j=%0d t=%0t", dut.i_idx, dut.j_idx, $time);
+        end
+
+        if (dut.add_done) begin
+            $display("[ADD_DONE] i=%0d j=%0d t=%0t", dut.i_idx, dut.j_idx, $time);
+        end
+
+        if (dut.state == 26 && dut.k_dout_valid) begin // S_HASH_H_WAIT
+            $display("[HPK_CAP] idx=%0d data=%02h t=%0t", dut.var_k, dut.k_dout, $time);
+        end
+
+        if (dut.state == 33 && dut.pump_src_sel == 8 && dut.pump_cnt < 4) begin
+            $display("[PW_OUT] i=%0d j=%0d rd=%0d data=%h t=%0t",
+                dut.i_idx, dut.j_idx, dut.pump_rd_addr, dut.pump_read_data, $time);
+        end
+
+        if (dut.state == 33 && dut.pump_src_sel == 9 && dut.pump_cnt < 4) begin
+            $display("[ADD_OUT] i=%0d j=%0d rd=%0d data=%h t=%0t",
+                dut.i_idx, dut.j_idx, dut.pump_rd_addr, dut.pump_read_data, $time);
         end
     end
 
@@ -129,7 +218,7 @@ module tb_ml_kem_keygen();
                 start = 1;
                 @(posedge clk);
                 start = 0;
-                
+                 
                 cycle_count = 0;
                 while (!done) begin
                     @(posedge clk);

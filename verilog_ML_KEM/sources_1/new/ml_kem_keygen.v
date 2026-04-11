@@ -28,10 +28,13 @@ module ml_kem_keygen (
     localparam S_IDLE              = 6'd0;
     localparam S_HASH_G            = 6'd1;
     localparam S_HASH_G_WAIT       = 6'd2;
+    localparam S_HASH_G_FINAL      = 6'd35;
 
     localparam S_GEN_NOISE_INIT    = 6'd3;
     localparam S_PRF_SHAKE256      = 6'd4;
     localparam S_PRF_WAIT          = 6'd5;
+    localparam S_PRF_FINAL         = 6'd36;
+
     localparam S_CBD               = 6'd6;
     localparam S_CBD_WAIT          = 6'd7;
     localparam S_PUMP_S_TO_NTT     = 6'd8;
@@ -43,7 +46,11 @@ module ml_kem_keygen (
     localparam S_MAT_MUL_J_INIT    = 6'd13;
     localparam S_XOF_A             = 6'd14;
     localparam S_XOF_WAIT          = 6'd15;
+    localparam S_XOF_FINAL         = 6'd37;
+    localparam S_XOF_PARSE_START   = 6'd38;
+
     localparam S_PUMP_A_TO_PW      = 6'd16;
+    localparam S_PUMP_A_TO_PW_2    = 6'd39;
     localparam S_PUMP_S_TO_PW      = 6'd17;
     localparam S_RUN_PW            = 6'd18;
     localparam S_PUMP_PW_TO_ADD    = 6'd19;
@@ -136,11 +143,25 @@ module ml_kem_keygen (
             // True Dual Port Ram (BRAM18K)
             reg [15:0] mem [0:255];
             reg [15:0] out_a, out_b;
+//            always @(posedge clk) begin
+//                if (ram_we_a[g]) mem[ram_addr_a[g]] <= ram_din_a[g];
+//                out_a <= mem[ram_addr_a[g]];
+//            end
+//            always @(posedge clk) begin
+//                if (ram_we_b[g]) mem[ram_addr_b[g]] <= ram_din_b[g];
+//                out_b <= mem[ram_addr_b[g]];
+//            end
+
+            // Khởi tạo mảng bằng 0 để chặn X-Propagation
+            integer i;
+            initial begin
+                for (i = 0; i < 256; i = i + 1) mem[i] = 16'd0;
+            end
+            // GỘP CHUNG VÀO 1 ALWAYS BLOCK
             always @(posedge clk) begin
                 if (ram_we_a[g]) mem[ram_addr_a[g]] <= ram_din_a[g];
                 out_a <= mem[ram_addr_a[g]];
-            end
-            always @(posedge clk) begin
+                
                 if (ram_we_b[g]) mem[ram_addr_b[g]] <= ram_din_b[g];
                 out_b <= mem[ram_addr_b[g]];
             end
@@ -345,8 +366,13 @@ module ml_kem_keygen (
             end
         end
         
+        // Prime the first A_hat read one cycle before entering S_PUMP.
+        else if (state == S_PUMP_A_TO_PW || state == S_PUMP_A_TO_PW_2) begin
+            ram_addr_a[6] = 8'd0;
+        end
+
         // Parse inline write override (Target: 6 = A_hat_buf)
-        else if (state == S_XOF_A || state == S_XOF_WAIT) begin
+        else if (state == S_XOF_A || state == S_XOF_WAIT || state == S_XOF_PARSE_START) begin
             ram_addr_a[6] = {parse_ram_addr, 1'b0};
             ram_addr_b[6] = {parse_ram_addr, 1'b1};
             ram_din_a[6]  = parse_ram_a0_din;
@@ -371,7 +397,7 @@ module ml_kem_keygen (
 
     // PK and SK Routing
     assign pk_we = (state == S_DUMP_PK_WAIT) ? tb_byte_we :
-                   (state == S_PACK_PK)      ? 1'b1 : 1'b0;
+                   (state == S_PACK_PK && var_k < 32) ? 1'b1 : 1'b0;
 
     assign pk_addr = (state == S_DUMP_PK_WAIT) ? tb_byte_addr + {1'b0, i_idx, 8'd0} + {2'b0, i_idx, 7'd0} :
                      (state == S_PACK_PK)      ? 11'd1152 + var_k[10:0] : 11'd0;
@@ -380,9 +406,9 @@ module ml_kem_keygen (
                      (state == S_PACK_PK)      ? rho_reg[var_k[4:0]] : 8'd0;
 
     assign sk_we = (state == S_PACK_SK_SHAT_WAIT) ? tb_byte_we :
-                   (state == S_PACK_SK_PK)        ? 1'b1 :
-                   (state == S_PACK_SK_HPK)       ? 1'b1 :
-                   (state == S_PACK_SK_Z)         ? 1'b1 : 1'b0;
+                   (state == S_PACK_SK_PK  && var_k < 1184) ? 1'b1 :
+                   (state == S_PACK_SK_HPK && var_k < 32)   ? 1'b1 :
+                   (state == S_PACK_SK_Z   && var_k < 32)   ? 1'b1 : 1'b0;
 
     assign sk_addr = (state == S_PACK_SK_SHAT_WAIT) ? {1'b0, tb_byte_addr} + {2'b0, i_idx, 8'd0} + {3'b0, i_idx, 7'd0} :
                      (state == S_PACK_SK_PK)        ? 12'd1152 + var_k :
@@ -448,7 +474,6 @@ module ml_kem_keygen (
                     end
                 end
 
-                //Băm hạt giống d bằng SHA3-512 (Hàm $G$). Kết quả đầu ra là 64 byte, cắt đôi
                 S_HASH_G: begin
                     if (k_din_ready) begin
                         k_din_valid <= 1;
@@ -457,14 +482,17 @@ module ml_kem_keygen (
                             var_k <= var_k + 1;
                         end else begin // var_k == 32
                             k_din <= 8'd3; // index k=3 for FIPS 203 ML-KEM-768
-                            finalize_keccak <= 1;
                             var_k <= 0;
-                            state <= S_HASH_G_WAIT;
+                            state <= S_HASH_G_FINAL;
                         end
                     end
                 end
 
-                //32 byte đầu làm rho (dùng cho XOF), 32 byte sau làm sigma (dùng cho PRF).
+                S_HASH_G_FINAL: begin
+                    finalize_keccak <= 1;
+                    state <= S_HASH_G_WAIT;
+                    end
+
                 S_HASH_G_WAIT: begin
                     fsm_k_dout_ready <= 1;
                     if (k_dout_valid) begin
@@ -496,7 +524,6 @@ module ml_kem_keygen (
                     end
                 end
 
-                // Chạy SHAKE256 với khóa $\sigma$ và một nonce để tạo ra dòng dữ liệu giả ngẫu nhiên.
                 S_PRF_SHAKE256: begin
                     if (k_din_ready) begin
                         k_din_valid <= 1;
@@ -505,15 +532,19 @@ module ml_kem_keygen (
                             var_k <= var_k + 1;
                         end else begin
                             k_din <= {5'd0, i_idx};
-                            finalize_keccak <= 1;
                             var_k <= 0;
-                            
-                            prf_word_idx <= 0;
-                            prf_byte_idx <= 0;
-                            state <= S_PRF_WAIT;
+                            state <= S_PRF_FINAL;
                         end
                     end
                 end
+
+                S_PRF_FINAL: begin
+                    finalize_keccak <= 1;
+                    prf_word_idx <= 0;
+                    prf_byte_idx <= 0;
+                    state <= S_PRF_WAIT;
+                end
+
 
                 S_PRF_WAIT: begin
                     fsm_k_dout_ready <= 1;
@@ -533,7 +564,6 @@ module ml_kem_keygen (
                     end
                 end
 
-                // Đưa dòng dữ liệu từ PRF vào bộ phận lấy mẫu nhị thức trung tâm (Centered Binomial Distribution - $\eta_2$). Ghi kết quả vào BRAM con ($s_i$ và $e_i$).
                 S_CBD: begin
                     cbd_start <= 1;
                     state <= S_CBD_WAIT;
@@ -614,23 +644,43 @@ module ml_kem_keygen (
                             var_k <= var_k + 1;
                         end else begin
                             k_din <= {5'd0, i_idx}; // i is pushed second
-                            finalize_keccak <= 1;
-                            state <= S_XOF_WAIT;
-                            parse_start <= 1;
+                            state <= S_XOF_FINAL;
                         end
                     end
+                end
+
+                S_XOF_FINAL: begin
+                    finalize_keccak <= 1;
+                    state <= S_XOF_PARSE_START;
+                end
+
+                S_XOF_PARSE_START: begin
+                    parse_start <= 1;
+                    state <= S_XOF_WAIT;
                 end
 
                 S_XOF_WAIT: begin
                     // poly_parse_inline_top controls SHAKE stream directly
                     if (parse_done) begin
-                        state <= S_PUMP;
-                        pump_src_sel <= SRC_AHAT;
-                        pump_dst_sel <= DST_PW_A; // Â[i][j] into RAM_A
-                        pump_ret_state <= S_PUMP_S_TO_PW;
-                        pump_cnt <= 0;
-                        pump_we <= 0;
+                        state <= S_PUMP_A_TO_PW;
                     end
+                end
+
+                S_PUMP_A_TO_PW: begin
+                    state <= S_PUMP_A_TO_PW_2;
+                end
+
+                S_PUMP_A_TO_PW_2: begin
+                    state <= S_PUMP;
+                    pump_src_sel <= SRC_AHAT;
+                    pump_dst_sel <= DST_PW_A;
+                    pump_ret_state <= S_PUMP_S_TO_PW;
+                    // Use normal pump sequencing to avoid duplicating coeff[1] into coeff[0].
+                    // We still keep the read-prime states above so coeff[0] is stable for first write.
+                    pump_cnt <= 0;
+                    pump_we <= 0;
+                    pump_rd_addr <= 0;
+                    pump_wr_addr <= 8'hFF;
                 end
 
                 S_PUMP_S_TO_PW: begin
@@ -696,16 +746,32 @@ module ml_kem_keygen (
                 end
 
                 S_HASH_H_PK: begin
-                    if (k_din_ready) begin
-                        k_din_valid <= 1;
+                    // Stream pk_buf to Keccak with proper valid/ready holding.
+                    // This avoids dropping one byte each absorb-block boundary.
+                    if (!k_din_valid) begin
                         if (var_k < 1184) begin
                             k_din <= pk_buf[var_k[10:0]];
+                            k_din_valid <= 1;
                             var_k <= var_k + 1;
                         end else begin
                             finalize_keccak <= 1;
                             var_k <= 0;
                             state <= S_HASH_H_WAIT;
                         end
+                    end else if (k_din_ready) begin
+                        if (var_k < 1184) begin
+                            k_din <= pk_buf[var_k[10:0]];
+                            k_din_valid <= 1;
+                            var_k <= var_k + 1;
+                        end else begin
+                            k_din_valid <= 0;
+                            finalize_keccak <= 1;
+                            var_k <= 0;
+                            state <= S_HASH_H_WAIT;
+                        end
+                    end else begin
+                        // Hold current byte and valid until ready is re-asserted.
+                        k_din_valid <= 1;
                     end
                 end
 
