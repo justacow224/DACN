@@ -1,3 +1,6 @@
 ai/
 docs/
 .agents/
+verilog_ML_KEM/scripts/keygen_metrics_template.md
+verilog_ML_KEM/scripts/keygen_metrics/
+.Xil

@@ -632,8 +632,15 @@ module ml_kem_keygen (
 
                 S_CBD_WAIT: begin
                     if (cbd_done) begin
-                        // Setup Pump: S/E -> NTT
-                        state <= S_PUMP_DESC;
+                        // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                        pump_src_sel <= (i_idx < 3) ? (SRC_S0 + i_idx) : (SRC_E0 + (i_idx - 3));
+                        pump_dst_sel <= DST_NTT;
+                        pump_ret_state <= S_RUN_NTT;
+                        pump_cnt <= 1;
+                        pump_we <= 0;
+                        pump_rd_addr <= 8'd0;
+                        pump_wr_addr <= 8'hFF;
+
                         pump_desc_src_sel <= (i_idx < 3) ? (SRC_S0 + i_idx) : (SRC_E0 + (i_idx - 3));
                         pump_desc_dst_sel <= DST_NTT;
                         pump_desc_ret_state <= S_RUN_NTT;
@@ -641,6 +648,7 @@ module ml_kem_keygen (
                         pump_desc_src_base <= 8'd0;
                         pump_desc_dst_base <= 8'd0;
                         pump_desc_op_flags <= 4'b0001; // bit0: pulse ntt_start when done
+                        state <= S_PUMP;
                     end
                 end
 
@@ -651,7 +659,15 @@ module ml_kem_keygen (
 
                 S_PUMP_NTT_TO_S: begin
                     if (ntt_done) begin
-                        state <= S_PUMP_DESC;
+                        // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                        pump_src_sel <= SRC_NTT;
+                        pump_dst_sel <= (i_idx < 3) ? (DST_S0 + i_idx) : (DST_E0 + (i_idx - 3));
+                        pump_ret_state <= S_GEN_NOISE_INIT;
+                        pump_cnt <= 1;
+                        pump_we <= 0;
+                        pump_rd_addr <= 8'd0;
+                        pump_wr_addr <= 8'hFF;
+
                         pump_desc_src_sel <= SRC_NTT;
                         pump_desc_dst_sel <= (i_idx < 3) ? (DST_S0 + i_idx) : (DST_E0 + (i_idx - 3));
                         pump_desc_ret_state <= S_GEN_NOISE_INIT;
@@ -659,6 +675,7 @@ module ml_kem_keygen (
                         pump_desc_src_base <= 8'd0;
                         pump_desc_dst_base <= 8'd0;
                         pump_desc_op_flags <= 4'b0000;
+                        state <= S_PUMP;
 
                         // Because state logic evaluated at end of pump returns to ret_state, we increment i_idx early
                         i_idx <= i_idx + 1;
@@ -671,7 +688,15 @@ module ml_kem_keygen (
                         state <= S_PACK_PK;
                         var_k <= 0;
                     end else begin
-                        state <= S_PUMP_DESC;
+                        // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                        pump_src_sel <= SRC_E0 + i_idx;
+                        pump_dst_sel <= DST_ADD_A; // Initialize accumulator with e_hat[i]
+                        pump_ret_state <= S_MAT_MUL_J_INIT;
+                        pump_cnt <= 1;
+                        pump_we <= 0;
+                        pump_rd_addr <= 8'd0;
+                        pump_wr_addr <= 8'hFF;
+
                         pump_desc_src_sel <= SRC_E0 + i_idx;
                         pump_desc_dst_sel <= DST_ADD_A; // Initialize accumulator with e_hat[i]
                         pump_desc_ret_state <= S_MAT_MUL_J_INIT;
@@ -679,6 +704,7 @@ module ml_kem_keygen (
                         pump_desc_src_base <= 8'd0;
                         pump_desc_dst_base <= 8'd0;
                         pump_desc_op_flags <= 4'b0000;
+                        state <= S_PUMP;
                         j_idx <= 0;
                     end
                 end
@@ -686,7 +712,15 @@ module ml_kem_keygen (
                 S_MAT_MUL_J_INIT: begin
                     if (j_idx == 3) begin
                         // End of row dot product, dump `add_sub.RAM_A` to A_hat_buf (acting as pk_buf)
-                        state <= S_PUMP_DESC;
+                        // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                        pump_src_sel <= SRC_ADD;
+                        pump_dst_sel <= DST_AHAT;
+                        pump_ret_state <= S_DUMP_PK;
+                        pump_cnt <= 1;
+                        pump_we <= 0;
+                        pump_rd_addr <= 8'd0;
+                        pump_wr_addr <= 8'hFF;
+
                         pump_desc_src_sel <= SRC_ADD;
                         pump_desc_dst_sel <= DST_AHAT;
                         pump_desc_ret_state <= S_DUMP_PK;
@@ -694,6 +728,7 @@ module ml_kem_keygen (
                         pump_desc_src_base <= 8'd0;
                         pump_desc_dst_base <= 8'd0;
                         pump_desc_op_flags <= 4'b0000;
+                        state <= S_PUMP;
                     end else begin
                         state <= S_XOF_A;
                         init_keccak <= 1;
@@ -740,7 +775,15 @@ module ml_kem_keygen (
                 end
 
                 S_PUMP_A_TO_PW_2: begin
-                    state <= S_PUMP_DESC;
+                    // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                    pump_src_sel <= SRC_AHAT;
+                    pump_dst_sel <= DST_PW_A;
+                    pump_ret_state <= S_PUMP_S_TO_PW;
+                    pump_cnt <= 1;
+                    pump_we <= 0;
+                    pump_rd_addr <= 8'd0;
+                    pump_wr_addr <= 8'hFF;
+
                     pump_desc_src_sel <= SRC_AHAT;
                     pump_desc_dst_sel <= DST_PW_A;
                     pump_desc_ret_state <= S_PUMP_S_TO_PW;
@@ -750,10 +793,19 @@ module ml_kem_keygen (
                     pump_desc_src_base <= 8'd0;
                     pump_desc_dst_base <= 8'd0;
                     pump_desc_op_flags <= 4'b0000;
+                    state <= S_PUMP;
                 end
 
                 S_PUMP_S_TO_PW: begin
-                    state <= S_PUMP_DESC;
+                    // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                    pump_src_sel <= SRC_S0 + j_idx;
+                    pump_dst_sel <= DST_PW_B; // s_hat[j] into RAM_B
+                    pump_ret_state <= S_RUN_PW;
+                    pump_cnt <= 1;
+                    pump_we <= 0;
+                    pump_rd_addr <= 8'd0;
+                    pump_wr_addr <= 8'hFF;
+
                     pump_desc_src_sel <= SRC_S0 + j_idx;
                     pump_desc_dst_sel <= DST_PW_B; // s_hat[j] into RAM_B
                     pump_desc_ret_state <= S_RUN_PW;
@@ -761,6 +813,7 @@ module ml_kem_keygen (
                     pump_desc_src_base <= 8'd0;
                     pump_desc_dst_base <= 8'd0;
                     pump_desc_op_flags <= 4'b0000;
+                    state <= S_PUMP;
                 end
 
                 S_RUN_PW: begin
@@ -770,7 +823,15 @@ module ml_kem_keygen (
 
                 S_PUMP_PW_TO_ADD: begin
                     if (pw_done) begin
-                        state <= S_PUMP_DESC;
+                        // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                        pump_src_sel <= SRC_PW;
+                        pump_dst_sel <= DST_ADD_B;
+                        pump_ret_state <= S_RUN_ADD;
+                        pump_cnt <= 1;
+                        pump_we <= 0;
+                        pump_rd_addr <= 8'd0;
+                        pump_wr_addr <= 8'hFF;
+
                         pump_desc_src_sel <= SRC_PW;
                         pump_desc_dst_sel <= DST_ADD_B;
                         pump_desc_ret_state <= S_RUN_ADD;
@@ -778,6 +839,7 @@ module ml_kem_keygen (
                         pump_desc_src_base <= 8'd0;
                         pump_desc_dst_base <= 8'd0;
                         pump_desc_op_flags <= 4'b0000;
+                        state <= S_PUMP;
                     end
                 end
 
