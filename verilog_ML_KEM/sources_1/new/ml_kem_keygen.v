@@ -933,7 +933,9 @@ module ml_kem_keygen (
                     pump_src_sel   <= pump_desc_src_sel;
                     pump_dst_sel   <= pump_desc_dst_sel;
                     pump_ret_state <= pump_desc_ret_state;
-                    pump_cnt       <= 0;
+                    // Prime read at src_base in this cycle, then start S_PUMP at cnt=1
+                    // so the first valid write can happen one cycle earlier.
+                    pump_cnt       <= 1;
                     pump_we        <= 0;
                     pump_rd_addr   <= pump_desc_src_base;
                     pump_wr_addr   <= pump_desc_dst_base - 1'b1;
