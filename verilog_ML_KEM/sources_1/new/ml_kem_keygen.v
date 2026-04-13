@@ -62,17 +62,22 @@ module ml_kem_keygen (
     localparam S_DUMP_PK_WAIT      = 6'd23;
 
     localparam S_PACK_PK           = 6'd24;
-    localparam S_HASH_H_PK         = 6'd25;
+    localparam S_HASH_H_PK         = 6'd25; // request read from pk_buf
     localparam S_HASH_H_WAIT       = 6'd26;
 
     localparam S_PACK_SK_SHAT      = 6'd27;
     localparam S_PACK_SK_SHAT_WAIT = 6'd28;
-    localparam S_PACK_SK_PK        = 6'd29;
+    localparam S_PACK_SK_PK        = 6'd29; // request read from pk_buf
     localparam S_PACK_SK_HPK       = 6'd30;
     localparam S_PACK_SK_Z         = 6'd31;
     localparam S_DONE              = 6'd32;
 
     localparam S_PUMP              = 6'd33;
+    localparam S_PUMP_DESC         = 6'd40;
+    localparam S_HASH_H_PK_SEND    = 6'd41;
+    localparam S_PACK_SK_PK_WRITE  = 6'd42;
+    localparam S_PACK_SK_PK_WAIT   = 6'd43;
+    localparam S_HASH_H_PK_WAIT    = 6'd44;
 
     reg [5:0] state;
 
@@ -102,6 +107,14 @@ module ml_kem_keygen (
     reg       pump_we;
     reg [7:0] pump_rd_addr;
     reg [7:0] pump_wr_addr;
+    reg [3:0] pump_desc_src_sel;
+    reg [3:0] pump_desc_dst_sel;
+    reg [7:0] pump_desc_len;
+    reg [7:0] pump_desc_src_base;
+    reg [7:0] pump_desc_dst_base;
+    reg [5:0] pump_desc_ret_state;
+    reg [3:0] pump_desc_op_flags;
+    wire [8:0] pump_desc_done_cnt = {1'b0, pump_desc_len} + 9'd2;
 
     localparam SRC_S0 = 4'd0, SRC_S1 = 4'd1, SRC_S2 = 4'd2;
     localparam SRC_E0 = 4'd3, SRC_E1 = 4'd4, SRC_E2 = 4'd5;
@@ -119,11 +132,54 @@ module ml_kem_keygen (
     wire [7:0] seed_z_byte;
     assign seed_z_byte = seed_z_in[var_k[4:0] * 8 +: 8];
 
-    // PK Buffer inside (for H_PK computation)
-    reg [7:0] pk_buf [0:1183]; // 1184 bytes BRAM
-    always @(posedge clk) begin
-        if (pk_we) pk_buf[pk_addr] <= pk_dout;
-    end
+    // PK buffer implemented as deterministic BRAM (single write + single read).
+    reg  [10:0] pk_buf_rd_addr;
+    reg         pk_buf_rd_en;
+    wire [7:0]  pk_buf_rd_data;
+
+    xpm_memory_sdpram #(
+        .ADDR_WIDTH_A(11),
+        .ADDR_WIDTH_B(11),
+        .AUTO_SLEEP_TIME(0),
+        .BYTE_WRITE_WIDTH_A(8),
+        .CASCADE_HEIGHT(0),
+        .CLOCKING_MODE("common_clock"),
+        .ECC_MODE("no_ecc"),
+        .MEMORY_INIT_FILE("none"),
+        .MEMORY_INIT_PARAM("0"),
+        .MEMORY_OPTIMIZATION("true"),
+        .MEMORY_PRIMITIVE("block"),
+        .MEMORY_SIZE(2048 * 8),
+        .MESSAGE_CONTROL(0),
+        .READ_DATA_WIDTH_B(8),
+        .READ_LATENCY_B(1),
+        .READ_RESET_VALUE_B("0"),
+        .RST_MODE_A("SYNC"),
+        .RST_MODE_B("SYNC"),
+        .SIM_ASSERT_CHK(0),
+        .USE_EMBEDDED_CONSTRAINT(0),
+        .USE_MEM_INIT(0),
+        .WAKEUP_TIME("disable_sleep"),
+        .WRITE_DATA_WIDTH_A(8),
+        .WRITE_MODE_B("read_first")
+    ) u_pk_buf (
+        .clka(clk),
+        .clkb(clk),
+        .ena(1'b1),
+        .enb(pk_buf_rd_en),
+        .wea(pk_we),
+        .addra(pk_addr),
+        .addrb(pk_buf_rd_addr),
+        .dina(pk_dout),
+        .doutb(pk_buf_rd_data),
+        .dbiterrb(),
+        .sbiterrb(),
+        .injectdbiterra(1'b0),
+        .injectsbiterra(1'b0),
+        .regceb(1'b1),
+        .rstb(1'b0),
+        .sleep(1'b0)
+    );
 
     // =================================================================
     // BRAM Array (7 x True Dual Port 256x16)
@@ -141,27 +197,20 @@ module ml_kem_keygen (
     generate
         for (g = 0; g < 7; g = g + 1) begin : gen_bram
             // True Dual Port Ram (BRAM18K)
-            reg [15:0] mem [0:255];
+            (* ram_style = "block" *) reg [15:0] mem [0:255];
             reg [15:0] out_a, out_b;
-//            always @(posedge clk) begin
-//                if (ram_we_a[g]) mem[ram_addr_a[g]] <= ram_din_a[g];
-//                out_a <= mem[ram_addr_a[g]];
-//            end
-//            always @(posedge clk) begin
-//                if (ram_we_b[g]) mem[ram_addr_b[g]] <= ram_din_b[g];
-//                out_b <= mem[ram_addr_b[g]];
-//            end
-
-            // Khởi tạo mảng bằng 0 để chặn X-Propagation
+`ifndef SYNTHESIS
+            // Initialize in simulation to reduce X-propagation during bring-up.
             integer i;
             initial begin
                 for (i = 0; i < 256; i = i + 1) mem[i] = 16'd0;
             end
-            // GỘP CHUNG VÀO 1 ALWAYS BLOCK
+`endif
             always @(posedge clk) begin
                 if (ram_we_a[g]) mem[ram_addr_a[g]] <= ram_din_a[g];
                 out_a <= mem[ram_addr_a[g]];
-                
+            end
+            always @(posedge clk) begin
                 if (ram_we_b[g]) mem[ram_addr_b[g]] <= ram_din_b[g];
                 out_b <= mem[ram_addr_b[g]];
             end
@@ -406,17 +455,17 @@ module ml_kem_keygen (
                      (state == S_PACK_PK)      ? rho_reg[var_k[4:0]] : 8'd0;
 
     assign sk_we = (state == S_PACK_SK_SHAT_WAIT) ? tb_byte_we :
-                   (state == S_PACK_SK_PK  && var_k < 1184) ? 1'b1 :
+                   (state == S_PACK_SK_PK_WRITE) ? 1'b1 :
                    (state == S_PACK_SK_HPK && var_k < 32)   ? 1'b1 :
                    (state == S_PACK_SK_Z   && var_k < 32)   ? 1'b1 : 1'b0;
 
     assign sk_addr = (state == S_PACK_SK_SHAT_WAIT) ? {1'b0, tb_byte_addr} + {2'b0, i_idx, 8'd0} + {3'b0, i_idx, 7'd0} :
-                     (state == S_PACK_SK_PK)        ? 12'd1152 + var_k :
+                     (state == S_PACK_SK_PK_WRITE)  ? 12'd1152 + var_k :
                      (state == S_PACK_SK_HPK)       ? 12'd2336 + var_k :
                      (state == S_PACK_SK_Z)         ? 12'd2368 + var_k : 12'd0;
 
     assign sk_dout = (state == S_PACK_SK_SHAT_WAIT) ? tb_byte_dout :
-                     (state == S_PACK_SK_PK)        ? pk_buf[var_k[10:0]] :
+                     (state == S_PACK_SK_PK_WRITE)  ? pk_buf_rd_data :
                      (state == S_PACK_SK_HPK)       ? h_pk_reg[var_k[4:0]] :
                      (state == S_PACK_SK_Z)         ? seed_z_byte : 8'd0;
 
@@ -451,6 +500,18 @@ module ml_kem_keygen (
             pump_wr_addr <= 0;
             pump_we      <= 0;
             pump_cnt     <= 0;
+            pump_src_sel <= 0;
+            pump_dst_sel <= 0;
+            pump_ret_state <= 0;
+            pump_desc_src_sel <= 0;
+            pump_desc_dst_sel <= 0;
+            pump_desc_len <= 0;
+            pump_desc_src_base <= 0;
+            pump_desc_dst_base <= 0;
+            pump_desc_ret_state <= 0;
+            pump_desc_op_flags <= 0;
+            pk_buf_rd_addr <= 0;
+            pk_buf_rd_en <= 0;
         end else begin
             // Default pulse signals
             init_keccak     <= 0;
@@ -572,12 +633,14 @@ module ml_kem_keygen (
                 S_CBD_WAIT: begin
                     if (cbd_done) begin
                         // Setup Pump: S/E -> NTT
-                        state <= S_PUMP;
-                        pump_src_sel <= (i_idx < 3) ? (SRC_S0 + i_idx) : (SRC_E0 + (i_idx - 3));
-                        pump_dst_sel <= DST_NTT;
-                        pump_ret_state <= S_RUN_NTT;
-                        pump_cnt <= 0;
-                        pump_we <= 0;
+                        state <= S_PUMP_DESC;
+                        pump_desc_src_sel <= (i_idx < 3) ? (SRC_S0 + i_idx) : (SRC_E0 + (i_idx - 3));
+                        pump_desc_dst_sel <= DST_NTT;
+                        pump_desc_ret_state <= S_RUN_NTT;
+                        pump_desc_len <= 8'd255;
+                        pump_desc_src_base <= 8'd0;
+                        pump_desc_dst_base <= 8'd0;
+                        pump_desc_op_flags <= 4'b0001; // bit0: pulse ntt_start when done
                     end
                 end
 
@@ -588,12 +651,14 @@ module ml_kem_keygen (
 
                 S_PUMP_NTT_TO_S: begin
                     if (ntt_done) begin
-                        state <= S_PUMP;
-                        pump_src_sel <= SRC_NTT;
-                        pump_dst_sel <= (i_idx < 3) ? (DST_S0 + i_idx) : (DST_E0 + (i_idx - 3));
-                        pump_ret_state <= S_GEN_NOISE_INIT; 
-                        pump_cnt <= 0;
-                        pump_we <= 0;
+                        state <= S_PUMP_DESC;
+                        pump_desc_src_sel <= SRC_NTT;
+                        pump_desc_dst_sel <= (i_idx < 3) ? (DST_S0 + i_idx) : (DST_E0 + (i_idx - 3));
+                        pump_desc_ret_state <= S_GEN_NOISE_INIT;
+                        pump_desc_len <= 8'd255;
+                        pump_desc_src_base <= 8'd0;
+                        pump_desc_dst_base <= 8'd0;
+                        pump_desc_op_flags <= 4'b0000;
 
                         // Because state logic evaluated at end of pump returns to ret_state, we increment i_idx early
                         i_idx <= i_idx + 1;
@@ -606,12 +671,14 @@ module ml_kem_keygen (
                         state <= S_PACK_PK;
                         var_k <= 0;
                     end else begin
-                        state <= S_PUMP;
-                        pump_src_sel <= SRC_E0 + i_idx;
-                        pump_dst_sel <= DST_ADD_A; // Initialize accumulator with ê[i]
-                        pump_ret_state <= S_MAT_MUL_J_INIT;
-                        pump_cnt <= 0;
-                        pump_we <= 0;
+                        state <= S_PUMP_DESC;
+                        pump_desc_src_sel <= SRC_E0 + i_idx;
+                        pump_desc_dst_sel <= DST_ADD_A; // Initialize accumulator with e_hat[i]
+                        pump_desc_ret_state <= S_MAT_MUL_J_INIT;
+                        pump_desc_len <= 8'd255;
+                        pump_desc_src_base <= 8'd0;
+                        pump_desc_dst_base <= 8'd0;
+                        pump_desc_op_flags <= 4'b0000;
                         j_idx <= 0;
                     end
                 end
@@ -619,12 +686,14 @@ module ml_kem_keygen (
                 S_MAT_MUL_J_INIT: begin
                     if (j_idx == 3) begin
                         // End of row dot product, dump `add_sub.RAM_A` to A_hat_buf (acting as pk_buf)
-                        state <= S_PUMP;
-                        pump_src_sel <= SRC_ADD;
-                        pump_dst_sel <= DST_AHAT;
-                        pump_ret_state <= S_DUMP_PK;
-                        pump_cnt <= 0;
-                        pump_we <= 0;
+                        state <= S_PUMP_DESC;
+                        pump_desc_src_sel <= SRC_ADD;
+                        pump_desc_dst_sel <= DST_AHAT;
+                        pump_desc_ret_state <= S_DUMP_PK;
+                        pump_desc_len <= 8'd255;
+                        pump_desc_src_base <= 8'd0;
+                        pump_desc_dst_base <= 8'd0;
+                        pump_desc_op_flags <= 4'b0000;
                     end else begin
                         state <= S_XOF_A;
                         init_keccak <= 1;
@@ -671,25 +740,27 @@ module ml_kem_keygen (
                 end
 
                 S_PUMP_A_TO_PW_2: begin
-                    state <= S_PUMP;
-                    pump_src_sel <= SRC_AHAT;
-                    pump_dst_sel <= DST_PW_A;
-                    pump_ret_state <= S_PUMP_S_TO_PW;
+                    state <= S_PUMP_DESC;
+                    pump_desc_src_sel <= SRC_AHAT;
+                    pump_desc_dst_sel <= DST_PW_A;
+                    pump_desc_ret_state <= S_PUMP_S_TO_PW;
                     // Use normal pump sequencing to avoid duplicating coeff[1] into coeff[0].
                     // We still keep the read-prime states above so coeff[0] is stable for first write.
-                    pump_cnt <= 0;
-                    pump_we <= 0;
-                    pump_rd_addr <= 0;
-                    pump_wr_addr <= 8'hFF;
+                    pump_desc_len <= 8'd255;
+                    pump_desc_src_base <= 8'd0;
+                    pump_desc_dst_base <= 8'd0;
+                    pump_desc_op_flags <= 4'b0000;
                 end
 
                 S_PUMP_S_TO_PW: begin
-                    state <= S_PUMP;
-                    pump_src_sel <= SRC_S0 + j_idx;
-                    pump_dst_sel <= DST_PW_B; // ŝ[j] into RAM_B
-                    pump_ret_state <= S_RUN_PW;
-                    pump_cnt <= 0;
-                    pump_we <= 0;
+                    state <= S_PUMP_DESC;
+                    pump_desc_src_sel <= SRC_S0 + j_idx;
+                    pump_desc_dst_sel <= DST_PW_B; // s_hat[j] into RAM_B
+                    pump_desc_ret_state <= S_RUN_PW;
+                    pump_desc_len <= 8'd255;
+                    pump_desc_src_base <= 8'd0;
+                    pump_desc_dst_base <= 8'd0;
+                    pump_desc_op_flags <= 4'b0000;
                 end
 
                 S_RUN_PW: begin
@@ -699,12 +770,14 @@ module ml_kem_keygen (
 
                 S_PUMP_PW_TO_ADD: begin
                     if (pw_done) begin
-                        state <= S_PUMP;
-                        pump_src_sel <= SRC_PW;
-                        pump_dst_sel <= DST_ADD_B; 
-                        pump_ret_state <= S_RUN_ADD;
-                        pump_cnt <= 0;
-                        pump_we <= 0;
+                        state <= S_PUMP_DESC;
+                        pump_desc_src_sel <= SRC_PW;
+                        pump_desc_dst_sel <= DST_ADD_B;
+                        pump_desc_ret_state <= S_RUN_ADD;
+                        pump_desc_len <= 8'd255;
+                        pump_desc_src_base <= 8'd0;
+                        pump_desc_dst_base <= 8'd0;
+                        pump_desc_op_flags <= 4'b0000;
                     end
                 end
 
@@ -746,32 +819,27 @@ module ml_kem_keygen (
                 end
 
                 S_HASH_H_PK: begin
-                    // Stream pk_buf to Keccak with proper valid/ready holding.
-                    // This avoids dropping one byte each absorb-block boundary.
-                    if (!k_din_valid) begin
-                        if (var_k < 1184) begin
-                            k_din <= pk_buf[var_k[10:0]];
-                            k_din_valid <= 1;
-                            var_k <= var_k + 1;
-                        end else begin
-                            finalize_keccak <= 1;
-                            var_k <= 0;
-                            state <= S_HASH_H_WAIT;
-                        end
-                    end else if (k_din_ready) begin
-                        if (var_k < 1184) begin
-                            k_din <= pk_buf[var_k[10:0]];
-                            k_din_valid <= 1;
-                            var_k <= var_k + 1;
-                        end else begin
-                            k_din_valid <= 0;
-                            finalize_keccak <= 1;
-                            var_k <= 0;
-                            state <= S_HASH_H_WAIT;
-                        end
+                    if (var_k < 1184) begin
+                        pk_buf_rd_addr <= var_k[10:0];
+                        pk_buf_rd_en <= 1;
+                        state <= S_HASH_H_PK_WAIT;
                     end else begin
-                        // Hold current byte and valid until ready is re-asserted.
+                        finalize_keccak <= 1;
+                        var_k <= 0;
+                        state <= S_HASH_H_WAIT;
+                    end
+                end
+
+                S_HASH_H_PK_WAIT: begin
+                    state <= S_HASH_H_PK_SEND;
+                end
+
+                S_HASH_H_PK_SEND: begin
+                    if (k_din_ready) begin
+                        k_din <= pk_buf_rd_data;
                         k_din_valid <= 1;
+                        var_k <= var_k + 1;
+                        state <= S_HASH_H_PK;
                     end
                 end
 
@@ -806,11 +874,40 @@ module ml_kem_keygen (
                 end
 
                 S_PACK_SK_PK: begin
-                    if (var_k < 1184) begin
-                        var_k <= var_k + 1;
+                    if (var_k == 0) begin
+                        pk_buf_rd_addr <= 11'd0;
+                        pk_buf_rd_en <= 1;
+                        state <= S_PACK_SK_PK_WAIT;
                     end else begin
-                        state <= S_PACK_SK_HPK;
+                        // Defensive fallback: re-prime if this state is re-entered unexpectedly.
+                        pk_buf_rd_addr <= 11'd0;
+                        pk_buf_rd_en <= 1;
                         var_k <= 0;
+                        state <= S_PACK_SK_PK_WAIT;
+                    end
+                end
+
+                S_PACK_SK_PK_WAIT: begin
+                    // Prime one more read so WRITE can stream continuously at 1 byte/cycle.
+                    pk_buf_rd_addr <= 11'd1;
+                    pk_buf_rd_en <= 1;
+                    state <= S_PACK_SK_PK_WRITE;
+                end
+
+                S_PACK_SK_PK_WRITE: begin
+                    if (var_k == 1183) begin
+                        pk_buf_rd_en <= 0;
+                        var_k <= 0;
+                        state <= S_PACK_SK_HPK;
+                    end else begin
+                        var_k <= var_k + 1;
+                        if (var_k <= 1181) begin
+                            pk_buf_rd_addr <= var_k[10:0] + 11'd2;
+                            pk_buf_rd_en <= 1;
+                        end else begin
+                            pk_buf_rd_en <= 0;
+                        end
+                        state <= S_PACK_SK_PK_WRITE;
                     end
                 end
 
@@ -831,17 +928,29 @@ module ml_kem_keygen (
                     end
                 end
 
+                // ================== Descriptor Launch ==================
+                S_PUMP_DESC: begin
+                    pump_src_sel   <= pump_desc_src_sel;
+                    pump_dst_sel   <= pump_desc_dst_sel;
+                    pump_ret_state <= pump_desc_ret_state;
+                    pump_cnt       <= 0;
+                    pump_we        <= 0;
+                    pump_rd_addr   <= pump_desc_src_base;
+                    pump_wr_addr   <= pump_desc_dst_base - 1'b1;
+                    state          <= S_PUMP;
+                end
+
                 // ================== Core Pump Engine (257 cycles) ==================
                 S_PUMP: begin
-                    if (pump_cnt == 257) begin
+                    if (pump_cnt == pump_desc_done_cnt) begin
                         pump_we <= 0;
                         pump_cnt <= 0;
-                        if (pump_dst_sel == DST_NTT) ntt_start <= 1;
-                        
+                        if (pump_desc_op_flags[0]) ntt_start <= 1;
+
                         state <= pump_ret_state;
                     end else begin
-                        pump_rd_addr <= pump_cnt;
-                        pump_wr_addr <= pump_cnt - 1;
+                        pump_rd_addr <= pump_desc_src_base + pump_cnt[7:0];
+                        pump_wr_addr <= pump_desc_dst_base + pump_cnt[7:0] - 1'b1;
                         pump_we      <= (pump_cnt > 0);
                         pump_cnt     <= pump_cnt + 1;
                     end
