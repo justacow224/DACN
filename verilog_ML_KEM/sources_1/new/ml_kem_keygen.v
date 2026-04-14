@@ -49,7 +49,6 @@ module ml_kem_keygen (
     localparam S_XOF_FINAL         = 6'd37;
     localparam S_XOF_PARSE_START   = 6'd38;
 
-    localparam S_PUMP_A_TO_PW      = 6'd16;
     localparam S_PUMP_A_TO_PW_2    = 6'd39;
     localparam S_PUMP_S_TO_PW      = 6'd17;
     localparam S_RUN_PW            = 6'd18;
@@ -409,7 +408,7 @@ module ml_kem_keygen (
         end
         
         // Prime the first A_hat read one cycle before entering S_PUMP.
-        else if (state == S_PUMP_A_TO_PW || state == S_PUMP_A_TO_PW_2) begin
+        else if (state == S_PUMP_A_TO_PW_2) begin
             ram_addr_a[6] = 8'd0;
         end
 
@@ -730,12 +729,8 @@ module ml_kem_keygen (
                 S_XOF_WAIT: begin
                     // poly_parse_inline_top controls SHAKE stream directly
                     if (parse_done) begin
-                        state <= S_PUMP_A_TO_PW;
+                        state <= S_PUMP_A_TO_PW_2;
                     end
-                end
-
-                S_PUMP_A_TO_PW: begin
-                    state <= S_PUMP_A_TO_PW_2;
                 end
 
                 S_PUMP_A_TO_PW_2: begin
@@ -940,8 +935,22 @@ module ml_kem_keygen (
                         pump_we <= 0;
                         pump_cnt <= 0;
                         if (pump_op_kick_ntt) ntt_start <= 1;
-
-                        state <= pump_ret_state;
+                        if (pump_ret_state == S_RUN_NTT) begin
+                            // P4.4-b: fold RUN_NTT hop by kicking NTT immediately on pump done.
+                            ntt_start <= 1;
+                            state <= S_PUMP_NTT_TO_S;
+                        end else if (pump_ret_state == S_RUN_PW) begin
+                            // P4.4-b: fold RUN_PW hop by kicking PW immediately on pump done.
+                            pw_start <= 1;
+                            state <= S_PUMP_PW_TO_ADD;
+                        end else if (pump_ret_state == S_RUN_ADD) begin
+                            // P4.4-b: fold RUN_ADD hop by kicking add immediately on pump done.
+                            add_start <= 1;
+                            add_is_sub <= 0;
+                            state <= S_RUN_ADD_WAIT;
+                        end else begin
+                            state <= pump_ret_state;
+                        end
                     end else begin
                         pump_rd_addr <= pump_rd_addr + 1'b1;
                         pump_wr_addr <= pump_wr_addr + 1'b1;
