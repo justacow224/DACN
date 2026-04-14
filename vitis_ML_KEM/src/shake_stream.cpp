@@ -4,10 +4,9 @@
 #include <stdint.h>
 
 // =========================================================
-// PHẦN 1: CÁC HẰNG SỐ VÀ HÀM HỖ TRỢ (VITIS STYLE)
+// PHẦN 1: CÁC HẰNG SỐ VÀ HÀM HỖ TRỢ
 // =========================================================
 
-// Round Constants (24 vòng) - Ép vào BRAM để tiết kiệm LUT cho logic Keccak
 const uint64_t KECCAK_RC[24] = {
     0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
     0x000000000000808b, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
@@ -17,7 +16,6 @@ const uint64_t KECCAK_RC[24] = {
     0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008
 };
 
-// Hàm xoay bit trái (Rotate Left) - Template tối ưu cho FPGA wiring
 template <int N>
 static ap_uint<64> ROTL(ap_uint<64> x, int n) {
     #pragma HLS INLINE
@@ -27,18 +25,13 @@ static ap_uint<64> ROTL(ap_uint<64> x, int n) {
 
 // =========================================================
 // PHẦN 2: LÕI KECCAK-F1600 (VITIS OPTIMIZED KERNEL)
+// Lõi này BẮT BUỘC phải INLINE off để làm Resource Sharing
 // =========================================================
 void keccak_f1600(uint64_t state[25]) {
-    // Tắt Inline để chia sẻ tài nguyên nếu gọi ở nhiều Lane
     #pragma HLS INLINE off
-    
-    // State phải là thanh ghi hoàn toàn để truy cập song song 25 từ 64-bit
     #pragma HLS ARRAY_PARTITION variable=state type=complete
+    #pragma HLS BIND_STORAGE variable=KECCAK_RC type=rom_1p impl=bram
 
-    // Ép mảng RC vào Block RAM để giải phóng hàng nghìn LUT
-    // #pragma HLS BIND_STORAGE variable=KECCAK_RC type=rom_1p impl=bram
-
-    // Chuyển đổi sang ap_uint để dùng phép toán bit tối ưu của Vitis
     ap_uint<64> stateArray[25];
     #pragma HLS ARRAY_PARTITION variable=stateArray type=complete
     
@@ -47,20 +40,18 @@ void keccak_f1600(uint64_t state[25]) {
         stateArray[i] = state[i];
     }
 
-    // Vòng lặp chính 24 Rounds
     LOOP_ROUND:
     for (int rnd = 0; rnd < 24; rnd++) {
-        // II=1 là mục tiêu tối thượng cho hiệu năng mật mã
-        #pragma HLS PIPELINE II=1
+        #pragma HLS PIPELINE II=2
 
-        // --- Step 1: Theta ---
         ap_uint<64> rowReg[5];
         #pragma HLS ARRAY_PARTITION variable=rowReg type=complete
         
         for (int i = 0; i < 5; i++) {
             #pragma HLS UNROLL
-            rowReg[i] = stateArray[i] ^ stateArray[i + 5] ^ stateArray[i + 10] ^ 
-                        stateArray[i + 15] ^ stateArray[i + 20];
+            ap_uint<64> t1 = stateArray[i] ^ stateArray[i + 5];
+            ap_uint<64> t2 = stateArray[i + 10] ^ stateArray[i + 15];
+            rowReg[i] = t1 ^ t2 ^ stateArray[i + 20];
         }
 
         for (int i = 0; i < 5; i++) {
@@ -72,7 +63,6 @@ void keccak_f1600(uint64_t state[25]) {
             }
         }
 
-        // --- Step 2 & 3: Rho & Pi (Sử dụng mảng tạm để triệt tiêu phụ thuộc) ---
         ap_uint<64> tmpStateArray[24];
         #pragma HLS ARRAY_PARTITION variable=tmpStateArray type=complete
 
@@ -101,7 +91,7 @@ void keccak_f1600(uint64_t state[25]) {
         tmpStateArray[22] = ROTL<64>(stateArray[9], 20);
         tmpStateArray[23] = ROTL<64>(stateArray[6], 44);
 
-        stateArray[10] = tmpStateArray[0]; stateArray[7] = tmpStateArray[1];
+        stateArray[10] = tmpStateArray[0];  stateArray[7] = tmpStateArray[1];
         stateArray[11] = tmpStateArray[2];  stateArray[17] = tmpStateArray[3];
         stateArray[18] = tmpStateArray[4];  stateArray[3] = tmpStateArray[5];
         stateArray[5] = tmpStateArray[6];   stateArray[16] = tmpStateArray[7];
@@ -114,7 +104,6 @@ void keccak_f1600(uint64_t state[25]) {
         stateArray[22] = tmpStateArray[20]; stateArray[9] = tmpStateArray[21];
         stateArray[6] = tmpStateArray[22];  stateArray[1] = tmpStateArray[23];
 
-        // --- Step 4: Chi ---
         for (int j = 0; j < 25; j += 5) {
             #pragma HLS UNROLL
             ap_uint<64> s0 = stateArray[j];
@@ -129,12 +118,9 @@ void keccak_f1600(uint64_t state[25]) {
             stateArray[j+3] ^= (~s4) & s0;
             stateArray[j+4] ^= (~s0) & s1;
         }
-
-        // --- Step 5: Iota ---
         stateArray[0] ^= KECCAK_RC[rnd];
     }
 
-    // Ghi trả lại state chuẩn
     for(int i=0; i<25; i++) {
         #pragma HLS UNROLL
         state[i] = stateArray[i];
@@ -142,17 +128,48 @@ void keccak_f1600(uint64_t state[25]) {
 }
 
 // =========================================================
-// PHẦN 3: CRYPTO WRAPPERS
+// PHẦN 3: UNIFIED CRYPTO WRAPPERS
+// Tất cả đều được ép INLINE để hòa logic vào module gọi
 // =========================================================
 
-void sha3_512_hash(uint8 input[33], uint8 output[64]) {
+void sha3_256_1184bytes(uint8 input[1184], uint8 output[32]) {
     #pragma HLS INLINE
-    uint64_t state[25];
+    uint64_t state[25] = {0};
+    #pragma HLS ARRAY_PARTITION variable=state type=complete
+
+    for(int b=0; b<8; b++) {
+        for(int w=0; w<17; w++) {
+            #pragma HLS PIPELINE II=1
+            uint64_t word = 0;
+            int base_idx = b*136 + w*8;
+            for(int j=0; j<8; j++) word |= ((uint64_t)input[base_idx+j] << (j*8));
+            state[w] ^= word;
+        }
+        keccak_f1600(state);
+    }
+    int offset = 1088;
+    for(int w=0; w<12; w++) {
+        #pragma HLS PIPELINE II=1
+        uint64_t word = 0;
+        for(int j=0; j<8; j++) word |= ((uint64_t)input[offset + w*8 + j] << (j*8));
+        state[w] ^= word;
+    }
+    state[12] ^= 0x06;
+    state[16] ^= (1ULL << 63);
+    keccak_f1600(state);
+
+    for(int i=0; i<4; i++) {
+        #pragma HLS UNROLL
+        uint64_t w = state[i];
+        for(int j=0; j<8; j++) output[i*8+j] = (uint8)(w >> (j*8));
+    }
+}
+
+void sha3_512_33bytes(uint8 input[33], uint8 output[64]) {
+    #pragma HLS INLINE
+    uint64_t state[25] = {0};
     #pragma HLS ARRAY_PARTITION variable=state type=complete
     
-    for(int i=0; i<25; i++) state[i] = 0;
-
-    // Absorb 33 bytes
     for(int i=0; i<4; i++) {
         uint64_t word = 0;
         for(int j=0; j<8; j++) word |= ((uint64_t)input[i*8+j] << (j*8));
@@ -160,13 +177,11 @@ void sha3_512_hash(uint8 input[33], uint8 output[64]) {
     }
     state[4] ^= (uint64_t)input[32];
 
-    // SHA3 Padding
     state[4] ^= (0x06ULL << 8);
     state[8] ^= (1ULL << 63);
 
     keccak_f1600(state);
 
-    // Squeeze
     for(int i=0; i<8; i++) {
         uint64_t word = state[i];
         for(int j=0; j<8; j++) {
@@ -176,11 +191,68 @@ void sha3_512_hash(uint8 input[33], uint8 output[64]) {
     }
 }
 
-void shake256_prf(uint8 input[33], uint64_t output_64[16]) {
+void sha3_512_64bytes(uint8 input[64], uint8 output[64]) {
     #pragma HLS INLINE
-    uint64_t state[25];
+    uint64_t state[25] = {0};
     #pragma HLS ARRAY_PARTITION variable=state type=complete
-    for(int i=0; i<25; i++) state[i] = 0;
+    
+    for(int w=0; w<8; w++) {
+        #pragma HLS PIPELINE II=1
+        uint64_t word = 0;
+        for(int j=0; j<8; j++) word |= ((uint64_t)input[w*8+j] << (j*8));
+        state[w] ^= word;
+    }
+    
+    state[8] ^= 0x06;
+    state[8] ^= (1ULL << 63);
+    keccak_f1600(state);
+
+    for(int i=0; i<8; i++) {
+        #pragma HLS UNROLL
+        uint64_t w = state[i];
+        for(int j=0; j<8; j++) output[i*8+j] = (uint8)(w >> (j*8));
+    }
+}
+
+void sha3_512_1120bytes(uint8 input[1120], uint8 output[64]) {
+    #pragma HLS INLINE
+    uint64_t state[25] = {0};
+    #pragma HLS ARRAY_PARTITION variable=state type=complete
+    
+    for(int b=0; b<15; b++) {
+        for(int w=0; w<9; w++) {
+            #pragma HLS PIPELINE II=1
+            uint64_t word = 0;
+            int base_idx = b*72 + w*8;
+            for(int j=0; j<8; j++) word |= ((uint64_t)input[base_idx+j] << (j*8));
+            state[w] ^= word;
+        }
+        keccak_f1600(state);
+    }
+    
+    int offset = 1080;
+    for(int w=0; w<5; w++) {
+        #pragma HLS PIPELINE II=1
+        uint64_t word = 0;
+        for(int j=0; j<8; j++) word |= ((uint64_t)input[offset + w*8 + j] << (j*8));
+        state[w] ^= word;
+    }
+    
+    state[5] ^= 0x06;
+    state[8] ^= (1ULL << 63);
+    keccak_f1600(state);
+
+    for(int i=0; i<8; i++) {
+        #pragma HLS UNROLL
+        uint64_t w = state[i];
+        for(int j=0; j<8; j++) output[i*8+j] = (uint8)(w >> (j*8));
+    }
+}
+
+void shake256_33bytes(uint8 input[33], uint64_t output_64[16]) {
+    #pragma HLS INLINE
+    uint64_t state[25] = {0};
+    #pragma HLS ARRAY_PARTITION variable=state type=complete
 
     for(int i=0; i<4; i++) {
         uint64_t word = 0;
@@ -189,7 +261,6 @@ void shake256_prf(uint8 input[33], uint64_t output_64[16]) {
     }
     state[4] ^= (uint64_t)input[32];
 
-    // SHAKE Padding
     state[4] ^= (0x1FULL << 8);
     state[16] ^= (1ULL << 63);
 
@@ -202,7 +273,6 @@ void shake256_prf(uint8 input[33], uint64_t output_64[16]) {
 }
 
 #define SHAKE128_RATE_WORDS 21
-
 void xof_absorb_squeeze(ap_uint<64> input_B[5], hls::stream<uint8>& out_stream) {
     #pragma HLS INLINE
     uint64_t state[25];
@@ -217,58 +287,14 @@ void xof_absorb_squeeze(ap_uint<64> input_B[5], hls::stream<uint8>& out_stream) 
 
     keccak_f1600(state);
 
-    // Vòng lặp Squeeze tối ưu cho Streaming
     for(int b=0; b<5; b++) {
         for(int i=0; i < SHAKE128_RATE_WORDS; i++) {
             uint64_t word = state[i];
             for(int k=0; k<8; k++) {
-                // II=1 giúp dữ liệu tuôn chảy liên tục vào parser
                 #pragma HLS PIPELINE II=1
                 out_stream.write((uint8)(word >> (k*8)));
             }
         }
         keccak_f1600(state);
-    }
-}
-
-void sha3_256_hash(uint8* input, int in_len, uint8 output[32]) {
-    #pragma HLS INLINE
-    uint64_t state[25];
-    #pragma HLS ARRAY_PARTITION variable=state type=complete
-    for(int i=0; i<25; i++) state[i] = 0;
-
-    const int RATE_WORDS = 17; 
-    int i = 0;
-    while (in_len >= 8) {
-        #pragma HLS PIPELINE II=1
-        uint64_t word = 0;
-        for (int j = 0; j < 8; j++) {
-            #pragma HLS UNROLL
-            word |= ((uint64_t)input[i + j] << (j * 8));
-        }
-        int word_idx = (i / 8) % RATE_WORDS;
-        state[word_idx] ^= word;
-        if (word_idx == RATE_WORDS - 1) {
-            keccak_f1600(state);
-        }
-        i += 8;
-        in_len -= 8;
-    }
-
-    for (int j = 0; j < in_len; j++) {
-         int byte_pos = i % 136;
-         state[byte_pos/8] ^= ((uint64_t)input[i] << ((byte_pos%8)*8));
-         i++;
-    }
-
-    int byte_pos = i % 136;
-    state[byte_pos/8] ^= (0x06ULL << ((byte_pos%8)*8));
-    state[16] ^= (1ULL << 63); 
-    keccak_f1600(state);
-
-    for(int j=0; j<4; j++) {
-        #pragma HLS UNROLL
-        uint64_t w = state[j];
-        for(int k=0; k<8; k++) output[j*8+k] = (uint8)(w >> (k*8));
     }
 }

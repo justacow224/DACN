@@ -1,5 +1,5 @@
 #include "params.h"
-#include "ap_int.h" // Cần thư viện này cho ap_int/ap_uint
+#include "ap_int.h" 
 
 // =========================================================
 // PHẦN 1: BẢNG TRA CỨU (BRAM STRATEGY)
@@ -44,11 +44,10 @@ const int16 GAMMAS[128] = {
 };
 
 // =========================================================
-// PHẦN 2: MUL_MOD (BARRETT w/ FULL DSP - OPTIMIZED)
+// PHẦN 2: MUL_MOD (BARRETT w/ FULL DSP)
 // =========================================================
-// Sử dụng ap_int để tối ưu hóa độ rộng bit cho bộ nhân
-typedef ap_int<13> coeff_t;      // Hệ số Kyber (13-bit)
-typedef ap_int<25> prod_t;       // Tích trung gian (25-bit)
+typedef ap_int<13> coeff_t;      
+typedef ap_int<25> prod_t;       
 
 int16 mul_mod(int16 a, int16 b) {
     #pragma HLS INLINE
@@ -56,28 +55,22 @@ int16 mul_mod(int16 a, int16 b) {
     coeff_t a_opt = (coeff_t)a;
     coeff_t b_opt = (coeff_t)b;
     
-    // 1. Nhân chính (25-bit) -> Dùng DSP
-    // latency=3 để HLS chèn thanh ghi pipeline vào DSP, cắt ngắn delay
     prod_t product;
     #pragma HLS BIND_OP variable=product op=mul impl=dsp latency=3
     product = a_opt * b_opt;
 
-    // 2. Barrett Reduction: product * 20159
-    // Kết quả nhân 25bit * 16bit ~ 41 bit -> Dùng ap_int<42>
     ap_int<42> t_full; 
     #pragma HLS BIND_OP variable=t_full op=mul impl=dsp latency=3
     t_full = product * 20159;
     
     coeff_t t = (coeff_t)(t_full >> 26);
     
-    // 3. Nhân trừ: t * 3329 -> Dùng DSP
     prod_t sub_term;
     #pragma HLS BIND_OP variable=sub_term op=mul impl=dsp latency=3
     sub_term = t * 3329;
     
     prod_t res = product - sub_term;
     
-    // Xử lý modulo cuối
     int16 res_final = (int16)res;
     if (res_final >= 3329) res_final -= 3329;
     
@@ -89,12 +82,11 @@ int16 mul_mod(int16 a, int16 b) {
 // =========================================================
 void ntt(int16 poly[256]) {
     #pragma HLS INLINE off
-    // Giữ factor=2 theo yêu cầu hệ thống
     #pragma HLS ARRAY_PARTITION variable=poly cyclic factor=2 
-    // Ép bảng hằng số vào BRAM để tiết kiệm LUT
-    // #pragma HLS BIND_STORAGE variable=ZETAS type=rom_1p impl=bram
+    
+    // MỞ KHÓA TỐI ƯU LUT: Ép ZETAS vào bộ nhớ BRAM
+    #pragma HLS BIND_STORAGE variable=ZETAS type=rom_1p impl=bram
 
-    // Dùng int cho các biến vòng lặp truy cập mảng để tránh warning
     int k = 1; 
     
     for (int len = 128; len >= 2; len >>= 1) {
@@ -105,7 +97,6 @@ void ntt(int16 poly[256]) {
             for (int j = start; j < start + len; j++) {
                 #pragma HLS PIPELINE II=2
                 
-                // Pipeline II=1 với factor=2 là khả thi vì mỗi chu kỳ đọc 2 số (poly[j], poly[j+len])
                 int16 t = mul_mod(zeta, poly[j + len]);
                 int16 r2 = poly[j] - t;
                 if (r2 < 0) r2 += KYBER_Q;
@@ -143,9 +134,10 @@ void basemul(int16 a0, int16 a1, int16 b0, int16 b1, int16 gamma, int16* c0_out,
 
 void poly_pointwise(int16 a[256], int16 b[256], int16 r[256]) {
     #pragma HLS INLINE off
-    // #pragma HLS BIND_STORAGE variable=GAMMAS type=rom_1p impl=bram
+    
+    // MỞ KHÓA TỐI ƯU LUT: Ép GAMMAS vào bộ nhớ BRAM
+    #pragma HLS BIND_STORAGE variable=GAMMAS type=rom_1p impl=bram
 
-    // Dùng int cho loop
     Pointwise_Loop: for(int i=0; i<128; i++) {
         #pragma HLS PIPELINE II=1
         
@@ -159,9 +151,8 @@ void poly_pointwise(int16 a[256], int16 b[256], int16 r[256]) {
 void inv_ntt(int16 poly[256]) {
     #pragma HLS INLINE off
     #pragma HLS ARRAY_PARTITION variable=poly cyclic factor=2
-    // #pragma HLS BIND_STORAGE variable=ZETAS type=rom_1p impl=bram
+    #pragma HLS BIND_STORAGE variable=ZETAS type=rom_1p impl=bram
     
-    // Dùng int cho biến vòng lặp
     int k = 127; 
     
     for (int len = 2; len <= 128; len <<= 1) {
@@ -184,21 +175,11 @@ void inv_ntt(int16 poly[256]) {
             }
         }
     }
-    // Vòng lặp cuối cùng
-    for (int i = 0; i < 256; i++) {
+    
+    // TỐI ƯU TỐC ĐỘ: Rút ngắn 50% thời gian chạy vòng lặp cuối nhờ factor=2
+    for (int i = 0; i < 256; i+=2) {
         #pragma HLS PIPELINE II=1
-        poly[i] = mul_mod(poly[i], F_INV_128);
+        poly[i]   = mul_mod(poly[i], F_INV_128);
+        poly[i+1] = mul_mod(poly[i+1], F_INV_128);
     }
-}
-
-// Wrappers (Interface chuẩn)
-void ntt_top(int16 poly[256]) {
-    #pragma HLS INTERFACE m_axi port=poly bundle=gmem0 max_widen_bitwidth=128
-    #pragma HLS INTERFACE s_axilite port=return
-    ntt(poly);
-}
-void invntt_top(int16 poly[256]) {
-    #pragma HLS INTERFACE m_axi port=poly bundle=gmem0 max_widen_bitwidth=128
-    #pragma HLS INTERFACE s_axilite port=return
-    inv_ntt(poly);
 }

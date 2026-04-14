@@ -4,18 +4,24 @@
 #include <vector>
 #include <iomanip>
 #include <cstring>
+#include "ap_int.h" // Thêm thư viện ap_int
 #include "params.h"
 
 // Kích thước chuẩn cho Kyber-768
-#define SK_SIZE 2400 // s_hat + pk + H(pk) + z
-#define CT_SIZE 1088 // u + v
+#define SK_SIZE 2400
+#define CT_SIZE 1088
 #define SS_SIZE 32
 
-// Khai báo DUT (Device Under Test)
+// Kích thước mảng 128-bit
+#define SK_SIZE_128 (SK_SIZE / 16) // 150
+#define CT_SIZE_128 (CT_SIZE / 16) // 68
+#define SS_SIZE_128 (SS_SIZE / 16) // 2
+
+// Khai báo DUT (Device Under Test) cập nhật theo interface mới
 void ml_kem_decaps(
-    uint8 sk_in[SK_SIZE],
-    uint8 ct_in[CT_SIZE],
-    uint8 ss_out[SS_SIZE]
+    ap_uint<128> sk_in[SK_SIZE_128],
+    ap_uint<128> ct_in[CT_SIZE_128],
+    ap_uint<128> ss_out[SS_SIZE_128]
 );
 
 // --- HÀM HỖ TRỢ ---
@@ -92,22 +98,46 @@ int main() {
         // KHI ĐỦ DỮ LIỆU INPUT VÀ OUTPUT
         if (has_sk && has_ct && has_ss) {
             
-            // 1. Prepare Hardware Buffers
-            uint8 sk_in[SK_SIZE];
-            uint8 ct_in[CT_SIZE];
-            uint8 ss_hw[SS_SIZE];
-
             // Check size để tránh segfault
             if (sk_vec.size() == SK_SIZE && ct_vec.size() == CT_SIZE) {
-                // Copy data
-                memcpy(sk_in, sk_vec.data(), SK_SIZE);
-                memcpy(ct_in, ct_vec.data(), CT_SIZE);
+                
+                // 1. Prepare Hardware Buffers (128-bit)
+                ap_uint<128> sk_hw_128[SK_SIZE_128];
+                ap_uint<128> ct_hw_128[CT_SIZE_128];
+                ap_uint<128> ss_hw_128[SS_SIZE_128];
+
+                // Đóng gói Secret Key (2400 bytes -> 150 x 128-bit)
+                for(int i = 0; i < SK_SIZE_128; i++) {
+                    ap_uint<128> chunk = 0;
+                    for(int j = 0; j < 16; j++) {
+                        chunk((j * 8) + 7, j * 8) = sk_vec[i * 16 + j];
+                    }
+                    sk_hw_128[i] = chunk;
+                }
+
+                // Đóng gói Ciphertext (1088 bytes -> 68 x 128-bit)
+                for(int i = 0; i < CT_SIZE_128; i++) {
+                    ap_uint<128> chunk = 0;
+                    for(int j = 0; j < 16; j++) {
+                        chunk((j * 8) + 7, j * 8) = ct_vec[i * 16 + j];
+                    }
+                    ct_hw_128[i] = chunk;
+                }
 
                 // 2. Call Hardware (DUT)
-                ml_kem_decaps(sk_in, ct_in, ss_hw);
+                ml_kem_decaps(sk_hw_128, ct_hw_128, ss_hw_128);
 
-                // 3. Verify
-                if (verify_bytes(ss_hw, ss_vec, SS_SIZE, "SharedSecret")) {
+                // 3. Unpack Output (Shared Secret: 2 x 128-bit -> 32 bytes)
+                uint8 ss_hw_bytes[SS_SIZE];
+                for(int i = 0; i < SS_SIZE_128; i++) {
+                    ap_uint<128> chunk = ss_hw_128[i];
+                    for(int j = 0; j < 16; j++) {
+                        ss_hw_bytes[i * 16 + j] = (uint8)chunk((j * 8) + 7, j * 8);
+                    }
+                }
+
+                // 4. Verify
+                if (verify_bytes(ss_hw_bytes, ss_vec, SS_SIZE, "SharedSecret")) {
                     std::cout << "PASS" << std::endl;
                     pass_count++;
                 } else {

@@ -4,10 +4,12 @@
 #include <cstring>
 #include <stdint.h>
 
-
 // --- EXTERN DECLARATIONS ---
 extern void keccak_f1600(uint64_t state[25]);
-extern void shake256_prf(uint8 input[33], uint64_t output_64[16]);
+extern void sha3_256_1184bytes(uint8 input[1184], uint8 output[32]);
+extern void sha3_512_64bytes(uint8 input[64], uint8 output[64]);
+extern void shake256_33bytes(uint8 input[33], uint64_t output_64[16]);
+
 extern void cbd_eta2(ap_uint<64> input_buf[16], int16 coeffs[256]);
 extern void ntt(int16 poly[256]);
 extern void inv_ntt(int16 poly[256]);
@@ -15,75 +17,17 @@ extern void poly_pointwise(int16 a[256], int16 b[256], int16 r[256]);
 extern void xof_absorb_squeeze(ap_uint<64> input_B[5], hls::stream<uint8>& out_stream);
 extern void parse_ntt(hls::stream<uint8>& in_bytes, int16 a_hat[KYBER_N]);
 
-// Thay đổi quan trọng: Ép Inline các hàm phụ trợ
-// Lưu ý: Bạn cần sửa cả trong file serializer.cpp (thêm pragma INLINE) hoặc copy nội dung hàm vào đây nếu muốn chắc chắn.
-// Tuy nhiên, với HLS, nếu ta gọi hàm nhỏ trong loop unroll, nó thường tự inline.
-// Để đảm bảo, ta khai báo lại prototype (việc inline thực sự diễn ra ở định nghĩa hàm).
 extern void poly_frombytes(uint8 input[384], int16 coeffs[KYBER_N]);
 extern void poly_frommsg(uint8 msg[32], int16 coeffs[KYBER_N]);
 extern void poly_compress_u(int16 coeffs[KYBER_N], uint8 output[320]);
 extern void poly_compress_v(int16 coeffs[KYBER_N], uint8 output[128]);
 
-// --- LOCAL STATIC FUNCTIONS ---
-// Giữ nguyên static để tránh duplicate logic SHA3
-static void sha3_512_64bytes_encaps(uint8 input[64], uint8 output[64]) {
-    #pragma HLS INLINE off
-    uint64_t state[25] = {0};
-    #pragma HLS ARRAY_PARTITION variable=state type=complete
-    for(int i=0; i<8; i++) {
-        #pragma HLS UNROLL
-        uint64_t w = 0;
-        for(int j=0; j<8; j++) w |= ((uint64_t)input[i*8+j] << (j*8));
-        state[i] ^= w;
-    }
-    state[8] ^= 0x06; 
-    state[8] ^= (1ULL << 63);
-    keccak_f1600(state);
-    for(int i=0; i<8; i++) {
-        #pragma HLS UNROLL
-        uint64_t w = state[i];
-        for(int j=0; j<8; j++) output[i*8+j] = (uint8)(w >> (j*8));
-    }
-}
-
-static void sha3_256_pk_encaps(uint8 input[1184], uint8 output[32]) {
-    #pragma HLS INLINE off
-    uint64_t state[25] = {0};
-    #pragma HLS ARRAY_PARTITION variable=state type=complete
-    
-    for(int b=0; b<8; b++) {
-        for(int w=0; w<17; w++) {
-            #pragma HLS PIPELINE II=1
-            uint64_t word = 0;
-            int base_idx = b*136 + w*8;
-            for(int j=0; j<8; j++) word |= ((uint64_t)input[base_idx+j] << (j*8));
-            state[w] ^= word;
-        }
-        keccak_f1600(state);
-    }
-    int offset = 1088;
-    for(int w=0; w<12; w++) {
-        #pragma HLS PIPELINE II=1
-        uint64_t word = 0;
-        for(int j=0; j<8; j++) word |= ((uint64_t)input[offset + w*8 + j] << (j*8));
-        state[w] ^= word;
-    }
-    state[12] ^= 0x06;
-    state[16] ^= (1ULL << 63); 
-    keccak_f1600(state);
-    for(int i=0; i<4; i++) {
-        #pragma HLS UNROLL
-        uint64_t w = state[i];
-        for(int j=0; j<8; j++) output[i*8+j] = (uint8)(w >> (j*8));
-    }
-}
-
 #define PK_SIZE 1184
 #define CT_SIZE 1088
-#define PK_SIZE_128  (PK_SIZE / 16)   // 74
-#define RAND_SIZE_128 (32 / 16)      // 2
-#define CT_SIZE_128  (CT_SIZE / 16)   // 68
-#define SS_SIZE_128  (32 / 16)       // 2
+#define PK_SIZE_128  (PK_SIZE / 16)   
+#define RAND_SIZE_128 (32 / 16)      
+#define CT_SIZE_128  (CT_SIZE / 16)   
+#define SS_SIZE_128  (32 / 16)       
 
 void ml_kem_encaps(
     ap_uint<128> pk_in[PK_SIZE_128],
@@ -97,15 +41,10 @@ void ml_kem_encaps(
     #pragma HLS INTERFACE m_axi port=ss_out bundle=gmem1 depth=2
     #pragma HLS INTERFACE s_axilite port=return
 
-    // Resource Allocation: Limit=3 is Sweet Spot
-    #pragma HLS ALLOCATION function instances=keccak_f1600 limit=3
-    #pragma HLS ALLOCATION function instances=ntt limit=3
-    #pragma HLS ALLOCATION function instances=inv_ntt limit=3
-    #pragma HLS ALLOCATION function instances=poly_pointwise limit=3
-
-    // --- MEMORY OPTIMIZATION ---
-    // Loại bỏ A_hat toàn cục để tiết kiệm BRAM
-    // int16 A_hat... -> REMOVED
+    #pragma HLS ALLOCATION function instances=keccak_f1600 limit=1
+    #pragma HLS ALLOCATION function instances=ntt limit=1
+    #pragma HLS ALLOCATION function instances=inv_ntt limit=1
+    #pragma HLS ALLOCATION function instances=poly_pointwise limit=1
 
     int16 t_hat[KYBER_K][KYBER_N];
     #pragma HLS ARRAY_PARTITION variable=t_hat dim=1 type=complete
@@ -123,12 +62,11 @@ void ml_kem_encaps(
     #pragma HLS ARRAY_PARTITION variable=v_poly cyclic factor=2
 
     uint8 pk_local[PK_SIZE];
-    #pragma HLS ARRAY_PARTITION variable=pk_local block factor=3 
+    #pragma HLS ARRAY_PARTITION variable=pk_local cyclic factor=16
     uint8 ct_local[CT_SIZE];
-    #pragma HLS ARRAY_PARTITION variable=ct_local block factor=3 
+    #pragma HLS ARRAY_PARTITION variable=ct_local cyclic factor=16
 
-    // --- UNPACK INPUTS (128-bit -> uint8) ---
-    // Unpack pk_in: 74 x ap_uint<128> -> 1184 bytes
+    // --- UNPACK INPUTS ---
     Unpack_PK_In: for(int i = 0; i < PK_SIZE_128; i++) {
         #pragma HLS PIPELINE II=1
         ap_uint<128> chunk = pk_in[i];
@@ -137,7 +75,6 @@ void ml_kem_encaps(
         }
     }
 
-    // Unpack randomness_m: 2 x ap_uint<128> -> 32 bytes
     uint8 randomness_m[32];
     #pragma HLS ARRAY_PARTITION variable=randomness_m complete
     Unpack_Rand_In: for(int i = 0; i < RAND_SIZE_128; i++) {
@@ -151,55 +88,63 @@ void ml_kem_encaps(
     // 1. Hashing
     uint8 h_pk[32];
     #pragma HLS ARRAY_PARTITION variable=h_pk complete
-    sha3_256_pk_encaps(pk_local, h_pk);
+    sha3_256_1184bytes(pk_local, h_pk);
 
     uint8 g_in[64];
     #pragma HLS ARRAY_PARTITION variable=g_in complete
+    
     for(int i=0; i<32; i++) {
-        #pragma HLS UNROLL
+        #pragma HLS PIPELINE II=1
         g_in[i] = randomness_m[i];
         g_in[32+i] = h_pk[i];
     }
     
     uint8 Kr[64]; 
     #pragma HLS ARRAY_PARTITION variable=Kr complete
-    sha3_512_64bytes_encaps(g_in, Kr);
+    sha3_512_64bytes(g_in, Kr);
     
-    // Store ss locally first, pack to 128-bit output at the end
     uint8 ss_local[32];
     #pragma HLS ARRAY_PARTITION variable=ss_local complete
     for(int i=0; i<32; i++) {
-        #pragma HLS UNROLL
+        #pragma HLS PIPELINE II=1
         ss_local[i] = Kr[i];
     }
 
-    // Unpack PK
+    // --- TỐI ƯU ĐỊNH TUYẾN: Trạm đệm giải nén Khóa công khai ---
     uint8 rho[32];
     #pragma HLS ARRAY_PARTITION variable=rho complete
+    
     for(int i=0; i<KYBER_K; i++) {
-        #pragma HLS UNROLL
-        poly_frombytes(&pk_local[i*384], t_hat[i]);
+        // TỐI ƯU: Chuyển sang complete để triệt tiêu cảnh báo Port Conflict
+        uint8 temp_pk_chunk[384];
+        #pragma HLS ARRAY_PARTITION variable=temp_pk_chunk complete
+        
+        for(int w=0; w<24; w++) { // 384 / 16 = 24
+            #pragma HLS PIPELINE II=1
+            for(int j=0; j<16; j++) {
+                temp_pk_chunk[w*16 + j] = pk_local[i*384 + w*16 + j];
+            }
+        }
+        poly_frombytes(temp_pk_chunk, t_hat[i]);
     }
-    for(int i=0; i<32; i++) {
-        #pragma HLS UNROLL
-        rho[i] = pk_local[1152 + i];
+    
+    for(int i=0; i<2; i++) {
+        #pragma HLS PIPELINE II=1
+        for(int j=0; j<16; j++) rho[i*16+j] = pk_local[1152 + i*16 + j];
     }
 
-    // 2. GEN NOISE (r, e1, e2) FIRST
-    // Sinh r trước để dùng cho phép nhân ma trận on-the-fly
-    
-    // Gen r (Parallel 3)
+    // 2. GEN NOISE
     Gen_R_Loop: for(int i=0; i<KYBER_K; i++) {
-        #pragma HLS UNROLL 
         uint8 prf_in[33];
         #pragma HLS ARRAY_PARTITION variable=prf_in complete
         for(int k=0; k<32; k++) prf_in[k] = Kr[32+k];
-        prf_in[32] = (uint8)i; // nonce 0,1,2
+        prf_in[32] = (uint8)i;
         
         uint64_t cbd_input[16];
-        shake256_prf(prf_in, cbd_input);
+        #pragma HLS ARRAY_PARTITION variable=cbd_input complete
+        shake256_33bytes(prf_in, cbd_input);
         
-        ap_uint<64> cbd_ap[16]; // Fix casting safely
+        ap_uint<64> cbd_ap[16];
         #pragma HLS ARRAY_PARTITION variable=cbd_ap complete
         for(int k=0; k<16; k++) cbd_ap[k] = cbd_input[k];
 
@@ -208,22 +153,22 @@ void ml_kem_encaps(
         cbd_eta2(cbd_ap, poly_temp);
         ntt(poly_temp);
         
-        for(int k=0; k<256; k++) {
+        for(int k=0; k<256; k+=2) {
             #pragma HLS PIPELINE II=1
             r_hat[i][k] = poly_temp[k];
+            r_hat[i][k+1] = poly_temp[k+1];
         }
     }
 
-    // Gen e1 (Parallel 3) -> Store in u_poly
     Gen_E1_Loop: for(int i=0; i<KYBER_K; i++) {
-        #pragma HLS UNROLL 
         uint8 prf_in[33];
         #pragma HLS ARRAY_PARTITION variable=prf_in complete
         for(int k=0; k<32; k++) prf_in[k] = Kr[32+k];
-        prf_in[32] = (uint8)(i + 3); // nonce 3,4,5
+        prf_in[32] = (uint8)(i + 3); 
         
         uint64_t cbd_input[16];
-        shake256_prf(prf_in, cbd_input);
+        #pragma HLS ARRAY_PARTITION variable=cbd_input complete
+        shake256_33bytes(prf_in, cbd_input);
         
         ap_uint<64> cbd_ap[16];
         #pragma HLS ARRAY_PARTITION variable=cbd_ap complete
@@ -232,7 +177,6 @@ void ml_kem_encaps(
         cbd_eta2(cbd_ap, u_poly[i]); 
     }
 
-    // Gen e2
     int16 e2[256];
     #pragma HLS ARRAY_PARTITION variable=e2 cyclic factor=2
     {
@@ -240,29 +184,26 @@ void ml_kem_encaps(
         for(int k=0; k<32; k++) prf_in[k] = Kr[32+k];
         prf_in[32] = 6;
         uint64_t cbd_input[16];
-        shake256_prf(prf_in, cbd_input);
+        #pragma HLS ARRAY_PARTITION variable=cbd_input complete
+        shake256_33bytes(prf_in, cbd_input);
         ap_uint<64> cbd_ap[16];
         #pragma HLS ARRAY_PARTITION variable=cbd_ap complete
         for(int k=0; k<16; k++) cbd_ap[k] = cbd_input[k];
         cbd_eta2(cbd_ap, e2);
     }
 
-    // 3. STREAMING MATRIX MULTIPLY (The Optimization)
-    // Tính u = A^T * r + e1
-    // Loop i (0..2): Tính từng đa thức u[i] song song
-    // Loop j (0..2): Duyệt qua các phần tử của A^T (tức là A[j][i])
-    
+    // 3. STREAMING MATRIX MULTIPLY
     Calc_U_Loop: for(int i=0; i<KYBER_K; i++) {
-        #pragma HLS UNROLL
         
-        int16 acc[256] = {0};
+        int16 acc[256];
         #pragma HLS ARRAY_PARTITION variable=acc cyclic factor=2
+        for(int k=0; k<256; k+=2) {
+            #pragma HLS PIPELINE II=1
+            acc[k] = 0;
+            acc[k+1] = 0;
+        }
         
-        // Inner loop: Generate A on-the-fly -> Mult -> Acc
         for(int j=0; j<KYBER_K; j++) {
-            // Không UNROLL loop này để tiết kiệm Keccak instance (chỉ cần 3 instance cho 3 hàng i)
-            
-            // Generate A[j][i] (Transpose)
             ap_uint<64> xof_in[5];
             #pragma HLS ARRAY_PARTITION variable=xof_in complete
             for(int w=0; w<4; w++) {
@@ -274,9 +215,8 @@ void ml_kem_encaps(
             xof_in[4] = (uint64_t)i | ((uint64_t)j << 8);
 
             hls::stream<uint8> strm;
-            #pragma HLS STREAM variable=strm depth=2048
+            #pragma HLS STREAM variable=strm depth=16
             
-            // Buffer cục bộ cực nhỏ cho 1 đa thức A
             int16 A_poly_temp[256];
             #pragma HLS ARRAY_PARTITION variable=A_poly_temp cyclic factor=2
             
@@ -284,42 +224,60 @@ void ml_kem_encaps(
             parse_ntt(strm, A_poly_temp);
             
             int16 prod[256];
+            #pragma HLS ARRAY_PARTITION variable=prod cyclic factor=2
             poly_pointwise(A_poly_temp, r_hat[j], prod);
             
-            for(int k=0; k<256; k++) {
-                #pragma HLS PIPELINE II=2
-                ap_int<16> sum = (ap_int<16>)acc[k] + prod[k];
-                while(sum >= KYBER_Q) sum -= KYBER_Q;
-                acc[k] = (int16)sum;
+            for(int k=0; k<256; k+=2) {
+                #pragma HLS PIPELINE II=1
+                ap_int<16> sum0 = (ap_int<16>)acc[k] + prod[k];
+                if(sum0 >= KYBER_Q) sum0 -= KYBER_Q;
+                acc[k] = (int16)sum0;
+
+                ap_int<16> sum1 = (ap_int<16>)acc[k+1] + prod[k+1];
+                if(sum1 >= KYBER_Q) sum1 -= KYBER_Q;
+                acc[k+1] = (int16)sum1;
             }
         }
         
         inv_ntt(acc);
         
-        // Cộng e1 (đang ở u_poly)
-        for(int k=0; k<256; k++) {
+        for(int k=0; k<256; k+=2) {
             #pragma HLS PIPELINE II=1
-            ap_int<16> val = (ap_int<16>)acc[k] + u_poly[i][k];
-            while(val >= KYBER_Q) val -= KYBER_Q;
-            if(val < 0) val += KYBER_Q;
-            u_poly[i][k] = (int16)val;
+            ap_int<16> val0 = (ap_int<16>)acc[k] + u_poly[i][k];
+            if(val0 >= KYBER_Q) val0 -= KYBER_Q;
+            if(val0 < 0) val0 += KYBER_Q;
+            u_poly[i][k] = (int16)val0;
+
+            ap_int<16> val1 = (ap_int<16>)acc[k+1] + u_poly[i][k+1];
+            if(val1 >= KYBER_Q) val1 -= KYBER_Q;
+            if(val1 < 0) val1 += KYBER_Q;
+            u_poly[i][k+1] = (int16)val1;
         }
     }
 
     // 4. Calc v
     {
-        int16 v_acc[256] = {0};
+        int16 v_acc[256];
         #pragma HLS ARRAY_PARTITION variable=v_acc cyclic factor=2
+        for(int k=0; k<256; k+=2) {
+            #pragma HLS PIPELINE II=1
+            v_acc[k] = 0;
+            v_acc[k+1] = 0;
+        }
+
         for(int i=0; i<KYBER_K; i++) {
-            #pragma HLS UNROLL 
             int16 prod[256];
             #pragma HLS ARRAY_PARTITION variable=prod cyclic factor=2
             poly_pointwise(t_hat[i], r_hat[i], prod);
-            for(int k=0; k<256; k++) {
-                #pragma HLS PIPELINE II=2
-                ap_int<16> sum = (ap_int<16>)v_acc[k] + prod[k];
-                while(sum >= KYBER_Q) sum -= KYBER_Q;
-                v_acc[k] = (int16)sum;
+            for(int k=0; k<256; k+=2) {
+                #pragma HLS PIPELINE II=1
+                ap_int<16> sum0 = (ap_int<16>)v_acc[k] + prod[k];
+                if(sum0 >= KYBER_Q) sum0 -= KYBER_Q;
+                v_acc[k] = (int16)sum0;
+
+                ap_int<16> sum1 = (ap_int<16>)v_acc[k+1] + prod[k+1];
+                if(sum1 >= KYBER_Q) sum1 -= KYBER_Q;
+                v_acc[k+1] = (int16)sum1;
             }
         }
         inv_ntt(v_acc);
@@ -328,25 +286,47 @@ void ml_kem_encaps(
         #pragma HLS ARRAY_PARTITION variable=m_poly cyclic factor=2
         poly_frommsg(randomness_m, m_poly);
         
-        for(int k=0; k<256; k++) {
+        for(int k=0; k<256; k+=2) {
             #pragma HLS PIPELINE II=1
-            ap_int<16> val = (ap_int<16>)v_acc[k] + e2[k] + m_poly[k];
-            while(val >= KYBER_Q) val -= KYBER_Q;
-            if(val < 0) val += KYBER_Q;
-            v_poly[k] = (int16)val;
+            ap_int<16> val0 = (ap_int<16>)v_acc[k] + e2[k] + m_poly[k];
+            if(val0 >= KYBER_Q) val0 -= KYBER_Q;
+            if(val0 < 0) val0 += KYBER_Q;
+            v_poly[k] = (int16)val0;
+
+            ap_int<16> val1 = (ap_int<16>)v_acc[k+1] + e2[k+1] + m_poly[k+1];
+            if(val1 >= KYBER_Q) val1 -= KYBER_Q;
+            if(val1 < 0) val1 += KYBER_Q;
+            v_poly[k+1] = (int16)val1;
         }
     }
 
     // 5. Pack Output
-    // Unroll packing để tận dụng các hàm đã được inline
     for(int i=0; i<KYBER_K; i++) {
-        #pragma HLS UNROLL
-        poly_compress_u(u_poly[i], &ct_local[i*320]);
-    }
-    poly_compress_v(v_poly, &ct_local[KYBER_K*320]);
+        // TỐI ƯU: Đổi sang complete 
+        uint8 temp_ct_chunk[320];
+        #pragma HLS ARRAY_PARTITION variable=temp_ct_chunk complete
+        
+        poly_compress_u(u_poly[i], temp_ct_chunk);
 
-    // --- PACK OUTPUTS (uint8 -> 128-bit) ---
-    // Pack ct_out: 1088 bytes -> 68 x ap_uint<128>
+        for(int w=0; w<20; w++) { // 320 / 16 = 20
+            #pragma HLS PIPELINE II=1
+            for(int j=0; j<16; j++) {
+                ct_local[i*320 + w*16 + j] = temp_ct_chunk[w*16 + j];
+            }
+        }
+    }
+    
+    uint8 temp_v_chunk[128];
+    #pragma HLS ARRAY_PARTITION variable=temp_v_chunk complete
+    poly_compress_v(v_poly, temp_v_chunk);
+    
+    for(int w=0; w<8; w++) { // 128 / 16 = 8
+        #pragma HLS PIPELINE II=1
+        for(int j=0; j<16; j++) {
+            ct_local[KYBER_K*320 + w*16 + j] = temp_v_chunk[w*16 + j];
+        }
+    }
+
     Pack_CT_Out: for(int i = 0; i < CT_SIZE_128; i++) {
         #pragma HLS PIPELINE II=1
         ap_uint<128> chunk = 0;
@@ -356,7 +336,6 @@ void ml_kem_encaps(
         ct_out[i] = chunk;
     }
 
-    // Pack ss_out: 32 bytes -> 2 x ap_uint<128>
     Pack_SS_Out: for(int i = 0; i < SS_SIZE_128; i++) {
         #pragma HLS PIPELINE II=1
         ap_uint<128> chunk = 0;
