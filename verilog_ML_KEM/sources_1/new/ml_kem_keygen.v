@@ -73,7 +73,6 @@ module ml_kem_keygen (
     localparam S_DONE              = 6'd32;
 
     localparam S_PUMP              = 6'd33;
-    localparam S_PUMP_DESC         = 6'd40;
     localparam S_HASH_H_PK_SEND    = 6'd41;
     localparam S_PACK_SK_PK_WRITE  = 6'd42;
     localparam S_PACK_SK_PK_WAIT   = 6'd43;
@@ -107,14 +106,8 @@ module ml_kem_keygen (
     reg       pump_we;
     reg [7:0] pump_rd_addr;
     reg [7:0] pump_wr_addr;
-    reg [3:0] pump_desc_src_sel;
-    reg [3:0] pump_desc_dst_sel;
-    reg [7:0] pump_desc_len;
-    reg [7:0] pump_desc_src_base;
-    reg [7:0] pump_desc_dst_base;
-    reg [5:0] pump_desc_ret_state;
-    reg [3:0] pump_desc_op_flags;
-    wire [8:0] pump_desc_done_cnt = {1'b0, pump_desc_len} + 9'd2;
+    reg [7:0] pump_len;
+    reg       pump_op_kick_ntt;
 
     localparam SRC_S0 = 4'd0, SRC_S1 = 4'd1, SRC_S2 = 4'd2;
     localparam SRC_E0 = 4'd3, SRC_E1 = 4'd4, SRC_E2 = 4'd5;
@@ -503,13 +496,8 @@ module ml_kem_keygen (
             pump_src_sel <= 0;
             pump_dst_sel <= 0;
             pump_ret_state <= 0;
-            pump_desc_src_sel <= 0;
-            pump_desc_dst_sel <= 0;
-            pump_desc_len <= 0;
-            pump_desc_src_base <= 0;
-            pump_desc_dst_base <= 0;
-            pump_desc_ret_state <= 0;
-            pump_desc_op_flags <= 0;
+            pump_len <= 0;
+            pump_op_kick_ntt <= 0;
             pk_buf_rd_addr <= 0;
             pk_buf_rd_en <= 0;
         end else begin
@@ -632,7 +620,7 @@ module ml_kem_keygen (
 
                 S_CBD_WAIT: begin
                     if (cbd_done) begin
-                        // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                        // Direct pump launch (P4.3): descriptor state removed
                         pump_src_sel <= (i_idx < 3) ? (SRC_S0 + i_idx) : (SRC_E0 + (i_idx - 3));
                         pump_dst_sel <= DST_NTT;
                         pump_ret_state <= S_RUN_NTT;
@@ -640,14 +628,8 @@ module ml_kem_keygen (
                         pump_we <= 0;
                         pump_rd_addr <= 8'd0;
                         pump_wr_addr <= 8'hFF;
-
-                        pump_desc_src_sel <= (i_idx < 3) ? (SRC_S0 + i_idx) : (SRC_E0 + (i_idx - 3));
-                        pump_desc_dst_sel <= DST_NTT;
-                        pump_desc_ret_state <= S_RUN_NTT;
-                        pump_desc_len <= 8'd255;
-                        pump_desc_src_base <= 8'd0;
-                        pump_desc_dst_base <= 8'd0;
-                        pump_desc_op_flags <= 4'b0001; // bit0: pulse ntt_start when done
+                        pump_len <= 8'd255;
+                        pump_op_kick_ntt <= 1'b1;
                         state <= S_PUMP;
                     end
                 end
@@ -659,7 +641,7 @@ module ml_kem_keygen (
 
                 S_PUMP_NTT_TO_S: begin
                     if (ntt_done) begin
-                        // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                        // Direct pump launch (P4.3): descriptor state removed
                         pump_src_sel <= SRC_NTT;
                         pump_dst_sel <= (i_idx < 3) ? (DST_S0 + i_idx) : (DST_E0 + (i_idx - 3));
                         pump_ret_state <= S_GEN_NOISE_INIT;
@@ -667,14 +649,8 @@ module ml_kem_keygen (
                         pump_we <= 0;
                         pump_rd_addr <= 8'd0;
                         pump_wr_addr <= 8'hFF;
-
-                        pump_desc_src_sel <= SRC_NTT;
-                        pump_desc_dst_sel <= (i_idx < 3) ? (DST_S0 + i_idx) : (DST_E0 + (i_idx - 3));
-                        pump_desc_ret_state <= S_GEN_NOISE_INIT;
-                        pump_desc_len <= 8'd255;
-                        pump_desc_src_base <= 8'd0;
-                        pump_desc_dst_base <= 8'd0;
-                        pump_desc_op_flags <= 4'b0000;
+                        pump_len <= 8'd255;
+                        pump_op_kick_ntt <= 1'b0;
                         state <= S_PUMP;
 
                         // Because state logic evaluated at end of pump returns to ret_state, we increment i_idx early
@@ -688,7 +664,7 @@ module ml_kem_keygen (
                         state <= S_PACK_PK;
                         var_k <= 0;
                     end else begin
-                        // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                        // Direct pump launch (P4.3): descriptor state removed
                         pump_src_sel <= SRC_E0 + i_idx;
                         pump_dst_sel <= DST_ADD_A; // Initialize accumulator with e_hat[i]
                         pump_ret_state <= S_MAT_MUL_J_INIT;
@@ -696,14 +672,8 @@ module ml_kem_keygen (
                         pump_we <= 0;
                         pump_rd_addr <= 8'd0;
                         pump_wr_addr <= 8'hFF;
-
-                        pump_desc_src_sel <= SRC_E0 + i_idx;
-                        pump_desc_dst_sel <= DST_ADD_A; // Initialize accumulator with e_hat[i]
-                        pump_desc_ret_state <= S_MAT_MUL_J_INIT;
-                        pump_desc_len <= 8'd255;
-                        pump_desc_src_base <= 8'd0;
-                        pump_desc_dst_base <= 8'd0;
-                        pump_desc_op_flags <= 4'b0000;
+                        pump_len <= 8'd255;
+                        pump_op_kick_ntt <= 1'b0;
                         state <= S_PUMP;
                         j_idx <= 0;
                     end
@@ -712,7 +682,7 @@ module ml_kem_keygen (
                 S_MAT_MUL_J_INIT: begin
                     if (j_idx == 3) begin
                         // End of row dot product, dump `add_sub.RAM_A` to A_hat_buf (acting as pk_buf)
-                        // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                        // Direct pump launch (P4.3): descriptor state removed
                         pump_src_sel <= SRC_ADD;
                         pump_dst_sel <= DST_AHAT;
                         pump_ret_state <= S_DUMP_PK;
@@ -720,14 +690,8 @@ module ml_kem_keygen (
                         pump_we <= 0;
                         pump_rd_addr <= 8'd0;
                         pump_wr_addr <= 8'hFF;
-
-                        pump_desc_src_sel <= SRC_ADD;
-                        pump_desc_dst_sel <= DST_AHAT;
-                        pump_desc_ret_state <= S_DUMP_PK;
-                        pump_desc_len <= 8'd255;
-                        pump_desc_src_base <= 8'd0;
-                        pump_desc_dst_base <= 8'd0;
-                        pump_desc_op_flags <= 4'b0000;
+                        pump_len <= 8'd255;
+                        pump_op_kick_ntt <= 1'b0;
                         state <= S_PUMP;
                     end else begin
                         state <= S_XOF_A;
@@ -775,7 +739,7 @@ module ml_kem_keygen (
                 end
 
                 S_PUMP_A_TO_PW_2: begin
-                    // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                    // Direct pump launch (P4.3): descriptor state removed
                     pump_src_sel <= SRC_AHAT;
                     pump_dst_sel <= DST_PW_A;
                     pump_ret_state <= S_PUMP_S_TO_PW;
@@ -783,21 +747,13 @@ module ml_kem_keygen (
                     pump_we <= 0;
                     pump_rd_addr <= 8'd0;
                     pump_wr_addr <= 8'hFF;
-
-                    pump_desc_src_sel <= SRC_AHAT;
-                    pump_desc_dst_sel <= DST_PW_A;
-                    pump_desc_ret_state <= S_PUMP_S_TO_PW;
-                    // Use normal pump sequencing to avoid duplicating coeff[1] into coeff[0].
-                    // We still keep the read-prime states above so coeff[0] is stable for first write.
-                    pump_desc_len <= 8'd255;
-                    pump_desc_src_base <= 8'd0;
-                    pump_desc_dst_base <= 8'd0;
-                    pump_desc_op_flags <= 4'b0000;
+                    pump_len <= 8'd255;
+                    pump_op_kick_ntt <= 1'b0;
                     state <= S_PUMP;
                 end
 
                 S_PUMP_S_TO_PW: begin
-                    // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                    // Direct pump launch (P4.3): descriptor state removed
                     pump_src_sel <= SRC_S0 + j_idx;
                     pump_dst_sel <= DST_PW_B; // s_hat[j] into RAM_B
                     pump_ret_state <= S_RUN_PW;
@@ -805,14 +761,8 @@ module ml_kem_keygen (
                     pump_we <= 0;
                     pump_rd_addr <= 8'd0;
                     pump_wr_addr <= 8'hFF;
-
-                    pump_desc_src_sel <= SRC_S0 + j_idx;
-                    pump_desc_dst_sel <= DST_PW_B; // s_hat[j] into RAM_B
-                    pump_desc_ret_state <= S_RUN_PW;
-                    pump_desc_len <= 8'd255;
-                    pump_desc_src_base <= 8'd0;
-                    pump_desc_dst_base <= 8'd0;
-                    pump_desc_op_flags <= 4'b0000;
+                    pump_len <= 8'd255;
+                    pump_op_kick_ntt <= 1'b0;
                     state <= S_PUMP;
                 end
 
@@ -823,7 +773,7 @@ module ml_kem_keygen (
 
                 S_PUMP_PW_TO_ADD: begin
                     if (pw_done) begin
-                        // Direct descriptor launch (P4.2): skip S_PUMP_DESC bubble
+                        // Direct pump launch (P4.3): descriptor state removed
                         pump_src_sel <= SRC_PW;
                         pump_dst_sel <= DST_ADD_B;
                         pump_ret_state <= S_RUN_ADD;
@@ -831,14 +781,8 @@ module ml_kem_keygen (
                         pump_we <= 0;
                         pump_rd_addr <= 8'd0;
                         pump_wr_addr <= 8'hFF;
-
-                        pump_desc_src_sel <= SRC_PW;
-                        pump_desc_dst_sel <= DST_ADD_B;
-                        pump_desc_ret_state <= S_RUN_ADD;
-                        pump_desc_len <= 8'd255;
-                        pump_desc_src_base <= 8'd0;
-                        pump_desc_dst_base <= 8'd0;
-                        pump_desc_op_flags <= 4'b0000;
+                        pump_len <= 8'd255;
+                        pump_op_kick_ntt <= 1'b0;
                         state <= S_PUMP;
                     end
                 end
@@ -990,33 +934,19 @@ module ml_kem_keygen (
                     end
                 end
 
-                // ================== Descriptor Launch ==================
-                S_PUMP_DESC: begin
-                    pump_src_sel   <= pump_desc_src_sel;
-                    pump_dst_sel   <= pump_desc_dst_sel;
-                    pump_ret_state <= pump_desc_ret_state;
-                    // Prime read at src_base in this cycle, then start S_PUMP at cnt=1
-                    // so the first valid write can happen one cycle earlier.
-                    pump_cnt       <= 1;
-                    pump_we        <= 0;
-                    pump_rd_addr   <= pump_desc_src_base;
-                    pump_wr_addr   <= pump_desc_dst_base - 1'b1;
-                    state          <= S_PUMP;
-                end
-
                 // ================== Core Pump Engine (257 cycles) ==================
                 S_PUMP: begin
-                    if (pump_cnt == pump_desc_done_cnt) begin
+                    if (pump_cnt == ({1'b0, pump_len} + 9'd2)) begin
                         pump_we <= 0;
                         pump_cnt <= 0;
-                        if (pump_desc_op_flags[0]) ntt_start <= 1;
+                        if (pump_op_kick_ntt) ntt_start <= 1;
 
                         state <= pump_ret_state;
                     end else begin
-                        pump_rd_addr <= pump_desc_src_base + pump_cnt[7:0];
-                        pump_wr_addr <= pump_desc_dst_base + pump_cnt[7:0] - 1'b1;
-                        pump_we      <= (pump_cnt > 0);
-                        pump_cnt     <= pump_cnt + 1;
+                        pump_rd_addr <= pump_rd_addr + 1'b1;
+                        pump_wr_addr <= pump_wr_addr + 1'b1;
+                        pump_we      <= 1'b1;
+                        pump_cnt     <= pump_cnt + 1'b1;
                     end
                 end
 
