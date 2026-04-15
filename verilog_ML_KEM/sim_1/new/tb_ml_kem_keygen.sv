@@ -2,7 +2,9 @@
 
 module tb_ml_kem_keygen();
     localparam bit DEBUG_VERBOSE = 1'b0;
+    localparam bit ENABLE_HPK_STREAM_CHECK = 1'b0;
     localparam int KEYGEN_TIMEOUT_CYCLES = 500000;
+    localparam int ST_HASH_H_PK_SEND = 41;
 
     // Clock and Reset
     reg clk;
@@ -199,6 +201,10 @@ module tb_ml_kem_keygen();
 
     int n, j, tmp, idx95, idx99;
 
+    // Phase 6.1 checker: verify H(pk) absorb byte-order in runtime.
+    int hpk_stream_idx;
+    bit hpk_stream_started;
+
     task automatic reset_and_clear_dut();
         int t;
         begin
@@ -209,6 +215,9 @@ module tb_ml_kem_keygen();
 
             for (t = 0; t < 1184; t++) pk_mem[t] = 8'h00;
             for (t = 0; t < 2400; t++) sk_mem[t] = 8'h00;
+
+            hpk_stream_idx = 0;
+            hpk_stream_started = 0;
         end
     endtask
 
@@ -238,6 +247,31 @@ module tb_ml_kem_keygen();
             $display("%s Done in %0d cycles.", tag, cycles_out);
         end
     endtask
+
+    // Runtime H(pk) stream order checker.
+    // Check absorbed bytes at Keccak input handshake (k_din_valid && k_din_ready),
+    // not raw BRAM dout timing, to avoid false mismatches at block boundaries.
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            hpk_stream_idx <= 0;
+            hpk_stream_started <= 0;
+        end else if (ENABLE_HPK_STREAM_CHECK) begin
+            #1;
+            if (dut.state == ST_HASH_H_PK_SEND && dut.k_din_valid && dut.k_din_ready) begin
+                if (hpk_stream_idx >= 1184) begin
+                    $display("HPK stream overflow: idx=%0d data=%02x", hpk_stream_idx, dut.k_din);
+                    $stop;
+                end
+                if (dut.k_din !== pk_mem[hpk_stream_idx]) begin
+                    $display("HPK stream mismatch at idx %0d: expected pk_mem=%02x got din=%02x",
+                             hpk_stream_idx, pk_mem[hpk_stream_idx], dut.k_din);
+                    $stop;
+                end
+                hpk_stream_idx <= hpk_stream_idx + 1;
+                hpk_stream_started <= 1;
+            end
+        end
+    end
 
 
     initial begin
@@ -305,6 +339,17 @@ module tb_ml_kem_keygen();
                 // Re-initialize DUT and clear captures before each KAT run
                 reset_and_clear_dut();
                 run_keygen_with_timeout($sformatf("KeyGen KAT #%0d", kat_count), cycle_count);
+
+                if (ENABLE_HPK_STREAM_CHECK) begin
+                    if (!hpk_stream_started) begin
+                        $display("HPK stream checker: stream never started in KAT #%0d", kat_count);
+                        $stop;
+                    end
+                    if (hpk_stream_idx != 1184) begin
+                        $display("HPK stream checker: expected 1184 bytes, got %0d in KAT #%0d", hpk_stream_idx, kat_count);
+                        $stop;
+                    end
+                end
 
                 if (kat_count > MAX_KAT_STATS) begin
                     $display("ERROR: MAX_KAT_STATS=%0d is too small", MAX_KAT_STATS);
@@ -406,6 +451,10 @@ module tb_ml_kem_keygen();
         seed_z = 256'h0;
         reset_and_clear_dut();
         run_keygen_with_timeout("Boundary all-zero seeds", cycle_count);
+        if (ENABLE_HPK_STREAM_CHECK && hpk_stream_idx != 1184) begin
+            $display("HPK stream checker (boundary zero): expected 1184 bytes, got %0d", hpk_stream_idx);
+            $stop;
+        end
         $display("Boundary all-zero seeds: PASSED");
 
         // Boundary 2: all-0xFF seeds
@@ -413,6 +462,10 @@ module tb_ml_kem_keygen();
         seed_z = {256{1'b1}};
         reset_and_clear_dut();
         run_keygen_with_timeout("Boundary all-FF seeds", cycle_count);
+        if (ENABLE_HPK_STREAM_CHECK && hpk_stream_idx != 1184) begin
+            $display("HPK stream checker (boundary all-FF): expected 1184 bytes, got %0d", hpk_stream_idx);
+            $stop;
+        end
         $display("Boundary all-FF seeds: PASSED");
 
         $finish;

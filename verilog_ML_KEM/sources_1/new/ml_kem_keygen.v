@@ -460,6 +460,83 @@ module ml_kem_keygen (
                      (state == S_PACK_SK_HPK)       ? h_pk_reg[var_k[4:0]] :
                      (state == S_PACK_SK_Z)         ? seed_z_byte : 8'd0;
 
+    // Helper to reduce duplicated pump-launch boilerplate.
+    task launch_pump;
+        input [3:0] src_i;
+        input [3:0] dst_i;
+        input [5:0] ret_state_i;
+        input       kick_ntt_i;
+        begin
+            pump_src_sel <= src_i;
+            pump_dst_sel <= dst_i;
+            pump_ret_state <= ret_state_i;
+            pump_cnt <= 1;
+            pump_we <= 0;
+            pump_rd_addr <= 8'd0;
+            pump_wr_addr <= 8'hFF;
+            pump_len <= 8'd255;
+            pump_op_kick_ntt <= kick_ntt_i;
+        end
+    endtask
+
+    task launch_keccak;
+        input [1:0] h_type;
+        input [5:0] target_state;
+        begin
+            init_keccak <= 1;
+            hash_type   <= h_type;
+            var_k       <= 0;
+            state       <= target_state;
+        end
+    endtask
+
+    // Pulse poly_tobytes start and jump to wait state.
+    task kick_tobytes_wait;
+        input [5:0] target_state;
+        begin
+            tb_start <= 1;
+            state <= target_state;
+        end
+    endtask
+
+    // Pulse add core start (add mode) and jump to add wait state.
+    task kick_add_wait;
+        begin
+            add_start <= 1;
+            add_is_sub <= 0;
+            state <= S_RUN_ADD_WAIT;
+        end
+    endtask
+
+    // Prime first pk_buf read and jump to PK-pack wait state.
+    task prime_pkbuf_read0_wait;
+        begin
+            pk_buf_rd_addr <= 11'd0;
+            pk_buf_rd_en <= 1;
+            state <= S_PACK_SK_PK_WAIT;
+        end
+    endtask
+
+    // Generic helper for 32-byte pack loops with defensive out-of-range fallback.
+    task pack32_advance_or_goto;
+        input [5:0] target_state;
+        input       clr_var_on_jump;
+        begin
+            if (var_k == 31) begin
+                state <= target_state;
+                if (clr_var_on_jump) begin
+                    var_k <= 0;
+                end
+            end else if (var_k < 31) begin
+                var_k <= var_k + 1;
+            end else begin
+                state <= target_state;
+                if (clr_var_on_jump) begin
+                    var_k <= 0;
+                end
+            end
+        end
+    endtask
 
     // =================================================================
     // Main Control FSM
@@ -514,10 +591,7 @@ module ml_kem_keygen (
                 S_IDLE: begin
                     done <= 0;
                     if (start) begin
-                        state       <= S_HASH_G;
-                        init_keccak <= 1;
-                        hash_type   <= 2'b11; // SHA3-512
-                        var_k       <= 0;
+                        launch_keccak(2'b11, S_HASH_G); // SHA3-512
                     end
                 end
 
@@ -561,24 +635,13 @@ module ml_kem_keygen (
                 // ================== Noise Generation Loop (i=0..5) ==================
                 S_GEN_NOISE_INIT: begin
                     if (i_idx == 6) begin
-                        // P5-safe-7: enter first matmul row directly (skip S_MAT_MUL_INIT hop).
+                        // P6-safe-1: enter first matmul row and jump to XOF directly after pump.
                         i_idx <= 0;
-                        pump_src_sel <= SRC_E0;          // e_hat[0] -> accumulator
-                        pump_dst_sel <= DST_ADD_A;
-                        pump_ret_state <= S_MAT_MUL_J_INIT;
-                        pump_cnt <= 1;
-                        pump_we <= 0;
-                        pump_rd_addr <= 8'd0;
-                        pump_wr_addr <= 8'hFF;
-                        pump_len <= 8'd255;
-                        pump_op_kick_ntt <= 1'b0;
+                        launch_pump(SRC_E0, DST_ADD_A, S_XOF_A, 1'b0); // e_hat[0] -> accumulator
                         j_idx <= 0;
                         state <= S_PUMP;
                     end else begin
-                        state       <= S_PRF_SHAKE256;
-                        init_keccak <= 1;
-                        hash_type   <= 2'b01; // SHAKE256
-                        var_k       <= 0;
+                        launch_keccak(2'b01, S_PRF_SHAKE256); // SHAKE256
                     end
                 end
 
@@ -632,15 +695,8 @@ module ml_kem_keygen (
                 S_CBD_WAIT: begin
                     if (cbd_done) begin
                         // Direct pump launch (P4.3): descriptor state removed
-                        pump_src_sel <= (i_idx < 3) ? (SRC_S0 + i_idx) : (SRC_E0 + (i_idx - 3));
-                        pump_dst_sel <= DST_NTT;
-                        pump_ret_state <= S_RUN_NTT;
-                        pump_cnt <= 1;
-                        pump_we <= 0;
-                        pump_rd_addr <= 8'd0;
-                        pump_wr_addr <= 8'hFF;
-                        pump_len <= 8'd255;
-                        pump_op_kick_ntt <= 1'b1;
+                        launch_pump((i_idx < 3) ? (SRC_S0 + i_idx) : (SRC_E0 + (i_idx - 3)),
+                                    DST_NTT, S_RUN_NTT, 1'b1);
                         state <= S_PUMP;
                     end
                 end
@@ -653,15 +709,8 @@ module ml_kem_keygen (
                 S_PUMP_NTT_TO_S: begin
                     if (ntt_done) begin
                         // Direct pump launch (P4.3): descriptor state removed
-                        pump_src_sel <= SRC_NTT;
-                        pump_dst_sel <= (i_idx < 3) ? (DST_S0 + i_idx) : (DST_E0 + (i_idx - 3));
-                        pump_ret_state <= S_GEN_NOISE_INIT;
-                        pump_cnt <= 1;
-                        pump_we <= 0;
-                        pump_rd_addr <= 8'd0;
-                        pump_wr_addr <= 8'hFF;
-                        pump_len <= 8'd255;
-                        pump_op_kick_ntt <= 1'b0;
+                        launch_pump(SRC_NTT, (i_idx < 3) ? (DST_S0 + i_idx) : (DST_E0 + (i_idx - 3)),
+                                    S_GEN_NOISE_INIT, 1'b0);
                         state <= S_PUMP;
 
                         // Because state logic evaluated at end of pump returns to ret_state, we increment i_idx early
@@ -676,15 +725,7 @@ module ml_kem_keygen (
                         var_k <= 0;
                     end else begin
                         // Direct pump launch (P4.3): descriptor state removed
-                        pump_src_sel <= SRC_E0 + i_idx;
-                        pump_dst_sel <= DST_ADD_A; // Initialize accumulator with e_hat[i]
-                        pump_ret_state <= S_MAT_MUL_J_INIT;
-                        pump_cnt <= 1;
-                        pump_we <= 0;
-                        pump_rd_addr <= 8'd0;
-                        pump_wr_addr <= 8'hFF;
-                        pump_len <= 8'd255;
-                        pump_op_kick_ntt <= 1'b0;
+                        launch_pump(SRC_E0 + i_idx, DST_ADD_A, S_MAT_MUL_J_INIT, 1'b0); // Init acc with e_hat[i]
                         state <= S_PUMP;
                         j_idx <= 0;
                     end
@@ -694,21 +735,10 @@ module ml_kem_keygen (
                     if (j_idx == 3) begin
                         // End of row dot product, dump `add_sub.RAM_A` to A_hat_buf (acting as pk_buf)
                         // Direct pump launch (P4.3): descriptor state removed
-                        pump_src_sel <= SRC_ADD;
-                        pump_dst_sel <= DST_AHAT;
-                        pump_ret_state <= S_DUMP_PK;
-                        pump_cnt <= 1;
-                        pump_we <= 0;
-                        pump_rd_addr <= 8'd0;
-                        pump_wr_addr <= 8'hFF;
-                        pump_len <= 8'd255;
-                        pump_op_kick_ntt <= 1'b0;
+                        launch_pump(SRC_ADD, DST_AHAT, S_DUMP_PK, 1'b0);
                         state <= S_PUMP;
                     end else begin
-                        state <= S_XOF_A;
-                        init_keccak <= 1;
-                        hash_type   <= 2'b00; // SHAKE128
-                        var_k       <= 0;
+                        launch_keccak(2'b00, S_XOF_A); // SHAKE128
                     end
                 end
 
@@ -742,30 +772,14 @@ module ml_kem_keygen (
                     // poly_parse_inline_top controls SHAKE stream directly
                     if (parse_done) begin
                         // P5-safe-4: launch A_hat->PW pump directly when parse completes.
-                        pump_src_sel <= SRC_AHAT;
-                        pump_dst_sel <= DST_PW_A;
-                        pump_ret_state <= S_PUMP_S_TO_PW;
-                        pump_cnt <= 1;
-                        pump_we <= 0;
-                        pump_rd_addr <= 8'd0;
-                        pump_wr_addr <= 8'hFF;
-                        pump_len <= 8'd255;
-                        pump_op_kick_ntt <= 1'b0;
+                        launch_pump(SRC_AHAT, DST_PW_A, S_PUMP_S_TO_PW, 1'b0);
                         state <= S_PUMP;
                     end
                 end
 
                 S_PUMP_S_TO_PW: begin
                     // Direct pump launch (P4.3): descriptor state removed
-                    pump_src_sel <= SRC_S0 + j_idx;
-                    pump_dst_sel <= DST_PW_B; // s_hat[j] into RAM_B
-                    pump_ret_state <= S_RUN_PW;
-                    pump_cnt <= 1;
-                    pump_we <= 0;
-                    pump_rd_addr <= 8'd0;
-                    pump_wr_addr <= 8'hFF;
-                    pump_len <= 8'd255;
-                    pump_op_kick_ntt <= 1'b0;
+                    launch_pump(SRC_S0 + j_idx, DST_PW_B, S_RUN_PW, 1'b0); // s_hat[j] into RAM_B
                     state <= S_PUMP;
                 end
 
@@ -777,23 +791,13 @@ module ml_kem_keygen (
                 S_PUMP_PW_TO_ADD: begin
                     if (pw_done) begin
                         // Direct pump launch (P4.3): descriptor state removed
-                        pump_src_sel <= SRC_PW;
-                        pump_dst_sel <= DST_ADD_B;
-                        pump_ret_state <= S_RUN_ADD;
-                        pump_cnt <= 1;
-                        pump_we <= 0;
-                        pump_rd_addr <= 8'd0;
-                        pump_wr_addr <= 8'hFF;
-                        pump_len <= 8'd255;
-                        pump_op_kick_ntt <= 1'b0;
+                        launch_pump(SRC_PW, DST_ADD_B, S_RUN_ADD, 1'b0);
                         state <= S_PUMP;
                     end
                 end
 
                 S_RUN_ADD: begin
-                    add_start <= 1;
-                    add_is_sub <= 0;
-                    state <= S_RUN_ADD_WAIT;
+                    kick_add_wait;
                 end
                 
                 S_RUN_ADD_WAIT: begin
@@ -801,27 +805,19 @@ module ml_kem_keygen (
                         // P5-safe-6: fold terminal j-loop hop (j=2 -> dump) directly.
                         if (j_idx == 2) begin
                             // End of row dot product, dump add result to A_hat buffer.
-                            pump_src_sel <= SRC_ADD;
-                            pump_dst_sel <= DST_AHAT;
-                            pump_ret_state <= S_DUMP_PK;
-                            pump_cnt <= 1;
-                            pump_we <= 0;
-                            pump_rd_addr <= 8'd0;
-                            pump_wr_addr <= 8'hFF;
-                            pump_len <= 8'd255;
-                            pump_op_kick_ntt <= 1'b0;
+                            launch_pump(SRC_ADD, DST_AHAT, S_DUMP_PK, 1'b0);
                             j_idx <= j_idx + 1;
                             state <= S_PUMP;
                         end else begin
+                            // P6-safe-1: skip S_MAT_MUL_J_INIT hop on hot path.
                             j_idx <= j_idx + 1;
-                            state <= S_MAT_MUL_J_INIT;
+                            launch_keccak(2'b00, S_XOF_A); // SHAKE128
                         end
                     end
                 end
 
                 S_DUMP_PK: begin
-                    tb_start <= 1;
-                    state <= S_DUMP_PK_WAIT;
+                    kick_tobytes_wait(S_DUMP_PK_WAIT);
                 end
 
                 S_DUMP_PK_WAIT: begin
@@ -832,16 +828,8 @@ module ml_kem_keygen (
                             var_k <= 0;
                             state <= S_PACK_PK;
                         end else begin
-                            // P5-safe-7: enter next matmul row directly (skip S_MAT_MUL_INIT hop).
-                            pump_src_sel <= SRC_E0 + i_idx + 1'b1;
-                            pump_dst_sel <= DST_ADD_A;
-                            pump_ret_state <= S_MAT_MUL_J_INIT;
-                            pump_cnt <= 1;
-                            pump_we <= 0;
-                            pump_rd_addr <= 8'd0;
-                            pump_wr_addr <= 8'hFF;
-                            pump_len <= 8'd255;
-                            pump_op_kick_ntt <= 1'b0;
+                            // P6-safe-1: enter next matmul row and jump to XOF directly after pump.
+                            launch_pump(SRC_E0 + i_idx + 1'b1, DST_ADD_A, S_XOF_A, 1'b0);
                             i_idx <= i_idx + 1;
                             j_idx <= 0;
                             state <= S_PUMP;
@@ -853,18 +841,12 @@ module ml_kem_keygen (
                 S_PACK_PK: begin
                     // P5-safe-5: fold terminal loop bubble (transition on last byte).
                     if (var_k == 31) begin
-                        state <= S_HASH_H_PK;
-                        var_k <= 0;
-                        init_keccak <= 1;
-                        hash_type <= 2'b10; // SHA3-256
+                        launch_keccak(2'b10, S_HASH_H_PK); // SHA3-256
                     end else if (var_k < 31) begin
                         var_k <= var_k + 1;
                     end else begin
                         // Defensive recovery if var_k is out of expected range.
-                        state <= S_HASH_H_PK;
-                        var_k <= 0;
-                        init_keccak <= 1;
-                        hash_type <= 2'b10; // SHA3-256
+                        launch_keccak(2'b10, S_HASH_H_PK); // SHA3-256
                     end
                 end
 
@@ -881,6 +863,7 @@ module ml_kem_keygen (
                 end
 
                 S_HASH_H_PK_WAIT: begin
+                    // Safe path: absorb BRAM sync-read latency per byte.
                     state <= S_HASH_H_PK_SEND;
                 end
 
@@ -897,11 +880,13 @@ module ml_kem_keygen (
                     fsm_k_dout_ready <= 1;
                     if (k_dout_valid) begin
                         h_pk_reg[var_k[4:0]] <= k_dout;
-                        var_k <= var_k + 1;
                         if (var_k == 31) begin
                             fsm_k_dout_ready <= 0;
-                            state <= S_PACK_SK_SHAT;
                             i_idx <= 0;
+                            // P6-safe-2: kick first SHAT->SK pack immediately (skip one control hop).
+                            kick_tobytes_wait(S_PACK_SK_SHAT_WAIT);
+                        end else begin
+                            var_k <= var_k + 1;
                         end
                     end
                 end
@@ -911,37 +896,31 @@ module ml_kem_keygen (
                         state <= S_PACK_SK_PK;
                         var_k <= 0;
                     end else begin
-                        tb_start <= 1;
-                        state <= S_PACK_SK_SHAT_WAIT;
+                        kick_tobytes_wait(S_PACK_SK_SHAT_WAIT);
                     end
                 end
 
                 S_PACK_SK_SHAT_WAIT: begin
                     if (tb_done) begin
-                        // P5-safe-8: fold terminal shat-pack hop (i=2 -> pack_pk) directly.
+                        // P6-safe-3: fold terminal shat->pack_pk control hop.
                         if (i_idx == 2) begin
                             i_idx <= i_idx + 1;
                             var_k <= 0;
-                            state <= S_PACK_SK_PK;
+                            prime_pkbuf_read0_wait;
                         end else begin
+                            // P6-safe-4: fold SHAT relaunch hop for i=0,1.
                             i_idx <= i_idx + 1;
-                            state <= S_PACK_SK_SHAT;
+                            kick_tobytes_wait(S_PACK_SK_SHAT_WAIT);
                         end
                     end
                 end
 
                 S_PACK_SK_PK: begin
-                    if (var_k == 0) begin
-                        pk_buf_rd_addr <= 11'd0;
-                        pk_buf_rd_en <= 1;
-                        state <= S_PACK_SK_PK_WAIT;
-                    end else begin
-                        // Defensive fallback: re-prime if this state is re-entered unexpectedly.
-                        pk_buf_rd_addr <= 11'd0;
-                        pk_buf_rd_en <= 1;
+                    // Defensive fallback: re-prime if this state is re-entered unexpectedly.
+                    if (var_k != 0) begin
                         var_k <= 0;
-                        state <= S_PACK_SK_PK_WAIT;
                     end
+                    prime_pkbuf_read0_wait;
                 end
 
                 S_PACK_SK_PK_WAIT: begin
@@ -970,28 +949,12 @@ module ml_kem_keygen (
 
                 S_PACK_SK_HPK: begin
                     // P5-safe-5: fold terminal loop bubble (transition on last byte).
-                    if (var_k == 31) begin
-                        state <= S_PACK_SK_Z;
-                        var_k <= 0;
-                    end else if (var_k < 31) begin
-                        var_k <= var_k + 1;
-                    end else begin
-                        // Defensive recovery if var_k is out of expected range.
-                        state <= S_PACK_SK_Z;
-                        var_k <= 0;
-                    end
+                    pack32_advance_or_goto(S_PACK_SK_Z, 1'b1);
                 end
 
                 S_PACK_SK_Z: begin
                     // P5-safe-5: fold terminal loop bubble (transition on last byte).
-                    if (var_k == 31) begin
-                        state <= S_DONE;
-                    end else if (var_k < 31) begin
-                        var_k <= var_k + 1;
-                    end else begin
-                        // Defensive recovery if var_k is out of expected range.
-                        state <= S_DONE;
-                    end
+                    pack32_advance_or_goto(S_DONE, 1'b0);
                 end
 
                 // ================== Core Pump Engine (257 cycles) ==================
@@ -1010,13 +973,13 @@ module ml_kem_keygen (
                             state <= S_PUMP_PW_TO_ADD;
                         end else if (pump_ret_state == S_RUN_ADD) begin
                             // P4.4-b: fold RUN_ADD hop by kicking add immediately on pump done.
-                            add_start <= 1;
-                            add_is_sub <= 0;
-                            state <= S_RUN_ADD_WAIT;
+                            kick_add_wait;
                         end else if (pump_ret_state == S_DUMP_PK) begin
                             // P5-safe: fold DUMP_PK hop by kicking ToBytes immediately on pump done.
-                            tb_start <= 1;
-                            state <= S_DUMP_PK_WAIT;
+                            kick_tobytes_wait(S_DUMP_PK_WAIT);
+                        end else if (pump_ret_state == S_XOF_A) begin
+                            // P6-safe-1: kick SHAKE128 directly on pump completion.
+                            launch_keccak(2'b00, S_XOF_A); // SHAKE128
                         end else begin
                             state <= pump_ret_state;
                         end
