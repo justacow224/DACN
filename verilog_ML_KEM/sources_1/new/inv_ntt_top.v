@@ -115,17 +115,27 @@ module inv_ntt_top (
 
     integer i;
     always @(posedge clk) begin
-        valid_sr  <= {valid_sr[PIPELINE_DELAY-2:0], calc_en};
-        bank_a_sr <= {bank_a_sr[PIPELINE_DELAY-2:0], bank_a};
-        
-        stage_sr[0]  <= stage;
-        addr_a_sr[0] <= addr_a;
-        addr_b_sr[0] <= addr_b;
-        
-        for (i = 1; i < PIPELINE_DELAY; i = i + 1) begin
-            stage_sr[i]  <= stage_sr[i-1];
-            addr_a_sr[i] <= addr_a_sr[i-1];
-            addr_b_sr[i] <= addr_b_sr[i-1];
+        if (!rst_n) begin
+            valid_sr  <= {PIPELINE_DELAY{1'b0}};
+            bank_a_sr <= {PIPELINE_DELAY{1'b0}};
+            for (i = 0; i < PIPELINE_DELAY; i = i + 1) begin
+                stage_sr[i]  <= 3'd0;
+                addr_a_sr[i] <= 7'd0;
+                addr_b_sr[i] <= 7'd0;
+            end
+        end else begin
+            valid_sr  <= {valid_sr[PIPELINE_DELAY-2:0], calc_en};
+            bank_a_sr <= {bank_a_sr[PIPELINE_DELAY-2:0], bank_a};
+
+            stage_sr[0]  <= stage;
+            addr_a_sr[0] <= addr_a;
+            addr_b_sr[0] <= addr_b;
+
+            for (i = 1; i < PIPELINE_DELAY; i = i + 1) begin
+                stage_sr[i]  <= stage_sr[i-1];
+                addr_a_sr[i] <= addr_a_sr[i-1];
+                addr_b_sr[i] <= addr_b_sr[i-1];
+            end
         end
     end
 
@@ -161,8 +171,13 @@ module inv_ntt_top (
     reg       bank_a_d1;
     reg [2:0] stage_d1;
     always @(posedge clk) begin
-        bank_a_d1 <= bank_a;
-        stage_d1  <= stage;
+        if (!rst_n) begin
+            bank_a_d1 <= 1'b0;
+            stage_d1  <= 3'd0;
+        end else begin
+            bank_a_d1 <= bank_a;
+            stage_d1  <= stage;
+        end
     end
 
     // Route RAM data to Butterfly. In Stage 7, force 'b' input to 0.
@@ -177,7 +192,7 @@ module inv_ntt_top (
     // Using the dedicated Inverse Twiddle ROM
     inv_zeta_rom u_inv_zeta_rom (
         .clk(clk),
-        .en(calc_en),
+        .en(1'b1),
         .addr(k_idx),
         .dout(inv_zeta_out)
     );
@@ -230,14 +245,22 @@ module inv_ntt_top (
     reg [15:0] ram1_dout_reg;
 
     always @(posedge clk) begin
-        ram0_dout_reg <= BRAM_0[sys_ram0_raddr]; 
-        if (sys_ram0_we) BRAM_0[sys_ram0_waddr] <= sys_ram0_din;
+        if (!rst_n) begin
+            ram0_dout_reg <= 16'd0;
+        end else begin
+            ram0_dout_reg <= BRAM_0[sys_ram0_raddr];
+            if (sys_ram0_we) BRAM_0[sys_ram0_waddr] <= sys_ram0_din;
+        end
     end
     assign ram0_dout = ram0_dout_reg;
 
     always @(posedge clk) begin
-        ram1_dout_reg <= BRAM_1[sys_ram1_raddr];
-        if (sys_ram1_we) BRAM_1[sys_ram1_waddr] <= sys_ram1_din;
+        if (!rst_n) begin
+            ram1_dout_reg <= 16'd0;
+        end else begin
+            ram1_dout_reg <= BRAM_1[sys_ram1_raddr];
+            if (sys_ram1_we) BRAM_1[sys_ram1_waddr] <= sys_ram1_din;
+        end
     end
     assign ram1_dout = ram1_dout_reg;
 

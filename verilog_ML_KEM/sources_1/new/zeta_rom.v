@@ -4,7 +4,7 @@ module zeta_rom (
     input  wire         clk,
     input  wire         en,
     input  wire [6:0]   addr,  // 128 phần tử -> 7 bit địa chỉ (0 đến 127)
-    output reg  [15:0]  dout
+    output reg  [15:0]  dout = 16'd0
 );
 
     reg [15:0] rom [0:127];
@@ -32,6 +32,8 @@ module zeta_rom (
     always @(posedge clk) begin
         if (en) begin
             dout <= rom[addr];
+        end else begin
+            dout <= 16'd0;
         end
     end
 

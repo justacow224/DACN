@@ -37,7 +37,12 @@ module ntt_butterfly (
     reg [11:0] a_delay_1, a_delay_2, a_delay_3, a_delay_4;
     
     always @(posedge clk) begin
-        if (en) begin
+        if (!rst_n) begin
+            a_delay_1 <= 12'd0;
+            a_delay_2 <= 12'd0;
+            a_delay_3 <= 12'd0;
+            a_delay_4 <= 12'd0;
+        end else if (en) begin
             a_delay_1 <= a[11:0];
             a_delay_2 <= a_delay_1;
             a_delay_3 <= a_delay_2;

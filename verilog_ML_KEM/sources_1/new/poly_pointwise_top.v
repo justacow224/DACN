@@ -79,19 +79,27 @@ module poly_pointwise_top (
     // =================================================================
     // 3. PIPELINE DELAY SHIFT REGISTERS
     // =================================================================
-    // CLEAN FIX: Only valid_sr needs explicit initialization to prevent X propagation
+    // Pipeline validity/address tracking for delayed writeback
     reg [PIPELINE_DELAY-1:0] valid_sr = 0; 
     reg [PIPELINE_DELAY-1:0] bank_even_sr;
     reg [6:0]                ram_addr_sr [0:PIPELINE_DELAY-1];
 
     integer i;
     always @(posedge clk) begin
-        valid_sr     <= {valid_sr[PIPELINE_DELAY-2:0], calc_en};
-        bank_even_sr <= {bank_even_sr[PIPELINE_DELAY-2:0], bank_even};
-        
-        ram_addr_sr[0] <= ram_addr;
-        for (i = 1; i < PIPELINE_DELAY; i = i + 1) begin
-            ram_addr_sr[i] <= ram_addr_sr[i-1];
+        if (!rst_n) begin
+            valid_sr     <= {PIPELINE_DELAY{1'b0}};
+            bank_even_sr <= {PIPELINE_DELAY{1'b0}};
+            for (i = 0; i < PIPELINE_DELAY; i = i + 1) begin
+                ram_addr_sr[i] <= 7'd0;
+            end
+        end else begin
+            valid_sr     <= {valid_sr[PIPELINE_DELAY-2:0], calc_en};
+            bank_even_sr <= {bank_even_sr[PIPELINE_DELAY-2:0], bank_even};
+
+            ram_addr_sr[0] <= ram_addr;
+            for (i = 1; i < PIPELINE_DELAY; i = i + 1) begin
+                ram_addr_sr[i] <= ram_addr_sr[i-1];
+            end
         end
     end
 
@@ -101,7 +109,7 @@ module poly_pointwise_top (
     wire [15:0] gamma_out;
     poly_gamma_rom u_gamma_rom (
         .clk(clk),
-        .en(calc_en),
+        .en(1'b1),
         .addr(step[6:0]),
         .dout(gamma_out)
     );
@@ -126,7 +134,10 @@ module poly_pointwise_top (
     // 5. CROSSBAR / MUX ROUTING & RAM INTERFACE
     // =================================================================
     reg bank_even_d1;
-    always @(posedge clk) bank_even_d1 <= bank_even;
+    always @(posedge clk) begin
+        if (!rst_n) bank_even_d1 <= 1'b0;
+        else        bank_even_d1 <= bank_even;
+    end
 
     wire [15:0] ram_a0_dout, ram_a1_dout;
     wire [15:0] ram_b0_dout, ram_b1_dout;
@@ -181,14 +192,22 @@ module poly_pointwise_top (
     reg [15:0] ram_a0_dout_reg, ram_a1_dout_reg;
 
     always @(posedge clk) begin
-        ram_a0_dout_reg <= BRAM_A_0[sys_ram_raddr]; 
-        if (sys_ram_a0_we) BRAM_A_0[sys_ram_waddr] <= sys_ram_a0_din;
+        if (!rst_n) begin
+            ram_a0_dout_reg <= 16'd0;
+        end else begin
+            ram_a0_dout_reg <= BRAM_A_0[sys_ram_raddr];
+            if (sys_ram_a0_we) BRAM_A_0[sys_ram_waddr] <= sys_ram_a0_din;
+        end
     end
     assign ram_a0_dout = ram_a0_dout_reg;
 
     always @(posedge clk) begin
-        ram_a1_dout_reg <= BRAM_A_1[sys_ram_raddr];
-        if (sys_ram_a1_we) BRAM_A_1[sys_ram_waddr] <= sys_ram_a1_din;
+        if (!rst_n) begin
+            ram_a1_dout_reg <= 16'd0;
+        end else begin
+            ram_a1_dout_reg <= BRAM_A_1[sys_ram_raddr];
+            if (sys_ram_a1_we) BRAM_A_1[sys_ram_waddr] <= sys_ram_a1_din;
+        end
     end
     assign ram_a1_dout = ram_a1_dout_reg;
 
@@ -198,14 +217,22 @@ module poly_pointwise_top (
     reg [15:0] ram_b0_dout_reg, ram_b1_dout_reg;
 
     always @(posedge clk) begin
-        ram_b0_dout_reg <= BRAM_B_0[sys_ram_raddr]; 
-        if (sys_ram_b0_we) BRAM_B_0[sys_ram_waddr] <= host_din;
+        if (!rst_n) begin
+            ram_b0_dout_reg <= 16'd0;
+        end else begin
+            ram_b0_dout_reg <= BRAM_B_0[sys_ram_raddr];
+            if (sys_ram_b0_we) BRAM_B_0[sys_ram_waddr] <= host_din;
+        end
     end
     assign ram_b0_dout = ram_b0_dout_reg;
 
     always @(posedge clk) begin
-        ram_b1_dout_reg <= BRAM_B_1[sys_ram_raddr];
-        if (sys_ram_b1_we) BRAM_B_1[sys_ram_waddr] <= host_din;
+        if (!rst_n) begin
+            ram_b1_dout_reg <= 16'd0;
+        end else begin
+            ram_b1_dout_reg <= BRAM_B_1[sys_ram_raddr];
+            if (sys_ram_b1_we) BRAM_B_1[sys_ram_waddr] <= host_din;
+        end
     end
     assign ram_b1_dout = ram_b1_dout_reg;
 

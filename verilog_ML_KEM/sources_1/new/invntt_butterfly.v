@@ -27,7 +27,11 @@ module invntt_butterfly (
     wire [12:0] sum = a[11:0] + b[11:0];
 
     always @(posedge clk) begin
-        if (en) begin
+        if (!rst_n) begin
+            sum_reg      <= 12'd0;
+            diff_reg     <= 12'd0;
+            inv_zeta_reg <= 12'd0;
+        end else if (en) begin
             // a_prime_temp = (a + b) mod Q
             if (sum >= KYBER_Q)
                 sum_reg <= sum - KYBER_Q;
@@ -67,6 +71,9 @@ module invntt_butterfly (
 
     always @(posedge clk) begin
         if (!rst_n) begin
+            sum_delay_1 <= 12'd0;
+            sum_delay_2 <= 12'd0;
+            sum_delay_3 <= 12'd0;
             a_prime <= 16'd0;
         end else if (en) begin
             sum_delay_1 <= sum_reg;

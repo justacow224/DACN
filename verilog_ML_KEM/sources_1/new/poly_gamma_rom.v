@@ -4,7 +4,7 @@ module poly_gamma_rom (
     input  wire         clk,
     input  wire         en,
     input  wire [6:0]   addr,  // 128 elements -> 7-bit address (0 to 127)
-    output reg  [15:0]  dout
+    output reg  [15:0]  dout = 16'd0
 );
 
     reg [15:0] rom [0:127];
@@ -33,6 +33,8 @@ module poly_gamma_rom (
     always @(posedge clk) begin
         if (en) begin
             dout <= rom[addr];
+        end else begin
+            dout <= 16'd0;
         end
     end
 

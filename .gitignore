@@ -3,4 +3,5 @@ docs/
 .agents/
 verilog_ML_KEM/scripts/keygen_metrics_template.md
 verilog_ML_KEM/scripts/keygen_metrics/
+verilog_ML_KEM/scripts/KeyGen/keygen_metrics/
 .Xil

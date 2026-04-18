@@ -87,12 +87,20 @@ module poly_add_sub_top (
 
     integer i;
     always @(posedge clk) begin
-        valid_sr     <= {valid_sr[PIPELINE_DELAY-2:0], calc_en};
-        bank_even_sr <= {bank_even_sr[PIPELINE_DELAY-2:0], bank_even};
-        
-        ram_addr_sr[0] <= ram_addr;
-        for (i = 1; i < PIPELINE_DELAY; i = i + 1) begin
-            ram_addr_sr[i] <= ram_addr_sr[i-1];
+        if (!rst_n) begin
+            valid_sr     <= {PIPELINE_DELAY{1'b0}};
+            bank_even_sr <= {PIPELINE_DELAY{1'b0}};
+            for (i = 0; i < PIPELINE_DELAY; i = i + 1) begin
+                ram_addr_sr[i] <= 7'd0;
+            end
+        end else begin
+            valid_sr     <= {valid_sr[PIPELINE_DELAY-2:0], calc_en};
+            bank_even_sr <= {bank_even_sr[PIPELINE_DELAY-2:0], bank_even};
+
+            ram_addr_sr[0] <= ram_addr;
+            for (i = 1; i < PIPELINE_DELAY; i = i + 1) begin
+                ram_addr_sr[i] <= ram_addr_sr[i-1];
+            end
         end
     end
 
@@ -100,7 +108,10 @@ module poly_add_sub_top (
     // 4. CROSSBAR (RAM READ TO MATH CORE)
     // =================================================================
     reg bank_even_d1;
-    always @(posedge clk) bank_even_d1 <= bank_even;
+    always @(posedge clk) begin
+        if (!rst_n) bank_even_d1 <= 1'b0;
+        else        bank_even_d1 <= bank_even;
+    end
 
     wire [15:0] ram_a0_dout, ram_a1_dout;
     wire [15:0] ram_b0_dout, ram_b1_dout;
@@ -129,7 +140,10 @@ module poly_add_sub_top (
     // Pipeline Register for Math Output (Cycle 2)
     reg [15:0] c0_out, c1_out;
     always @(posedge clk) begin
-        if (valid_sr[0]) begin
+        if (!rst_n) begin
+            c0_out <= 16'd0;
+            c1_out <= 16'd0;
+        end else if (valid_sr[0]) begin
             c0_out <= c0_next;
             c1_out <= c1_next;
         end
@@ -182,14 +196,22 @@ module poly_add_sub_top (
     reg [15:0] ram_a0_dout_reg, ram_a1_dout_reg;
 
     always @(posedge clk) begin
-        ram_a0_dout_reg <= BRAM_A_0[sys_ram_raddr]; 
-        if (sys_ram_a0_we) BRAM_A_0[sys_ram_waddr] <= sys_ram_a0_din;
+        if (!rst_n) begin
+            ram_a0_dout_reg <= 16'd0;
+        end else begin
+            ram_a0_dout_reg <= BRAM_A_0[sys_ram_raddr];
+            if (sys_ram_a0_we) BRAM_A_0[sys_ram_waddr] <= sys_ram_a0_din;
+        end
     end
     assign ram_a0_dout = ram_a0_dout_reg;
 
     always @(posedge clk) begin
-        ram_a1_dout_reg <= BRAM_A_1[sys_ram_raddr];
-        if (sys_ram_a1_we) BRAM_A_1[sys_ram_waddr] <= sys_ram_a1_din;
+        if (!rst_n) begin
+            ram_a1_dout_reg <= 16'd0;
+        end else begin
+            ram_a1_dout_reg <= BRAM_A_1[sys_ram_raddr];
+            if (sys_ram_a1_we) BRAM_A_1[sys_ram_waddr] <= sys_ram_a1_din;
+        end
     end
     assign ram_a1_dout = ram_a1_dout_reg;
 
@@ -199,14 +221,22 @@ module poly_add_sub_top (
     reg [15:0] ram_b0_dout_reg, ram_b1_dout_reg;
 
     always @(posedge clk) begin
-        ram_b0_dout_reg <= BRAM_B_0[sys_ram_raddr]; 
-        if (sys_ram_b0_we) BRAM_B_0[sys_ram_waddr] <= host_din;
+        if (!rst_n) begin
+            ram_b0_dout_reg <= 16'd0;
+        end else begin
+            ram_b0_dout_reg <= BRAM_B_0[sys_ram_raddr];
+            if (sys_ram_b0_we) BRAM_B_0[sys_ram_waddr] <= host_din;
+        end
     end
     assign ram_b0_dout = ram_b0_dout_reg;
 
     always @(posedge clk) begin
-        ram_b1_dout_reg <= BRAM_B_1[sys_ram_raddr];
-        if (sys_ram_b1_we) BRAM_B_1[sys_ram_waddr] <= host_din;
+        if (!rst_n) begin
+            ram_b1_dout_reg <= 16'd0;
+        end else begin
+            ram_b1_dout_reg <= BRAM_B_1[sys_ram_raddr];
+            if (sys_ram_b1_we) BRAM_B_1[sys_ram_waddr] <= host_din;
+        end
     end
     assign ram_b1_dout = ram_b1_dout_reg;
 

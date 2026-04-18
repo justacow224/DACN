@@ -21,7 +21,8 @@ module mul_mod (
     reg [23:0] P;
     always @(posedge clk) begin
         // Chỉ lấy 12 bit để nhân, tiết kiệm DSP
-        if (en) P <= a[11:0] * b[11:0];
+        if (!rst_n) P <= 24'd0;
+        else if (en) P <= a[11:0] * b[11:0];
     end
 
     // =========================================================
@@ -31,7 +32,10 @@ module mul_mod (
     reg [38:0] T_full;
     reg [23:0] P_delay1;
     always @(posedge clk) begin
-        if (en) begin
+        if (!rst_n) begin
+            T_full   <= 39'd0;
+            P_delay1 <= 24'd0;
+        end else if (en) begin
             T_full   <= P * BARRETT_V;
             P_delay1 <= P;
         end
@@ -46,7 +50,10 @@ module mul_mod (
     reg [23:0] P_delay2;
     reg [23:0] t_wire;
     always @(posedge clk) begin
-        if (en) begin
+        if (!rst_n) begin
+            P_delay2 <= 24'd0;
+            t_wire   <= 24'd0;
+        end else if (en) begin
             P_delay2 <= P_delay1;
             t_wire   <= T_full[37:26] * KYBER_Q;
         end
