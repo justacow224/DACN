@@ -38,7 +38,9 @@ graph LR
 | Module | Status |
 |--------|--------|
 | `ml_kem_keygen.v` | ✅ Verified (Phase 7 FSM Refactored, P6-safe-4) |
+| `ml_kem_keygen_io_wrapper.v` | ✅ Synthesis/Implementation IO wrapper |
 | `tb_ml_kem_keygen.sv` | ✅ Verified (100/100 KAT Full Flow Passed) |
+| `tb_ml_kem_keygen_wrapper.sv` | ✅ Verified (100/100 KAT Wrapper Flow Passed) |
 
 **FIPS 203 Ref:** Algorithm 16 (ML-KEM.KeyGen) bao gồm Algorithm 13 (K-PKE.KeyGen)
 
@@ -89,21 +91,30 @@ Output: m (32 bytes)
 
 > **Không cần** `keccak_sponge_top` — Decrypt không hashing.
 
-**BRAM nội bộ:**
-- 3× BRAM18K cho `s_hat[3]` (giải mã từ dk)
-- 3× BRAM18K cho `u_hat[3]` (NTT của u đã giải nén)
-- 1× BRAM18K cho `acc` (tích lũy pointwise)
-- **Tổng: 7× BRAM18K**
+**BRAM nội bộ (Phase-2 completed):**
+- 2× BRAM18K cho `dk_buf` (1152×8) + `ct_buf` (1088×8)
+- 2× BRAM18K cho `s_hat_mem0/1` (384×16 mỗi bank, 3 polynomials × 128 pairs)
+- 2× BRAM18K cho `u_poly_mem0/1` (384×16 mỗi bank)
+- 1× BRAM18K cho `u_hat_mem` (768×16)
+- 2× BRAM18K cho `v_mem0/1` (128×16 mỗi bank)
+- 1× BRAM18K cho `acc_mem` (256×16)
+- 1× BRAM18K cho `tmp_mem` (256×16)
+- 1× BRAM18K cho `w_mem` (256×16)
+- 2× BRAM18K cho `diff_mem0/1` (128×16 mỗi bank)
+- **Tổng standalone: 28× RAMB18E2** (14 từ kpke_decrypt + 12 từ IP cores + 2 auto-inferred)
+- Memory process tách riêng khỏi FSM, synchronous read với prefetch states
 
-**FSM States:**
+**FSM States (47 total, including 9 prefetch states):**
 ```
 S_IDLE → S_DECODE_SK (frombytes × 3) → S_DECOMPRESS_U (decompress_10 × 3)
-→ S_DECOMPRESS_V (decompress_4) → S_NTT_U (NTT × 3) 
-→ S_POINTWISE_ACC (pointwise + add × 3) → S_INTT_W (INTT)
-→ S_SUB_V_W (v - w) → S_COMPRESS_MSG (compress_1) → S_DONE
+→ S_DECOMPRESS_V (decompress_4) → S_NTT_LOAD_PREF → S_NTT_U (NTT × 3)
+→ S_PW_LOAD_A/B_PREF → S_POINTWISE_ACC (pointwise + add × 3)
+→ S_INTT_LOAD_PREF → S_INTT_W (INTT)
+→ S_SUB_LOAD_A/B_PREF → S_SUB_V_W (v - w)
+→ S_COMP_PREF → S_COMPRESS_MSG (compress_1) → S_DONE
 ```
 
-**Cycle Estimate:** ~11,000 cycles (~110 µs @ 100MHz)
+**Cycle Estimate:** ~21,060 cycles (~211 µs @ 100MHz) — measured post-Phase-2 BRAM refactor (100/100 KAT PASS, +60 cycles from prefetch states)
 
 #### [NEW] `tb_kpke_decrypt.sv`
 - KAT test: Cho `dk_PKE` + `ciphertext` → verify `message` khớp golden
@@ -289,7 +300,7 @@ end
 wire compare_pass = (xor_acc == 8'd0);  // Only valid after ALL bytes
 ```
 
-**Cycle Estimate:** ~99,000 cycles (~990 µs @ 100MHz)
+**Cycle Estimate:** ~109,000 cycles (~1,090 µs @ 100MHz)
 
 #### [NEW] `tb_ml_kem_decaps.sv`
 - Full KAT protocol test: `(sk, ct) → verify ss` khớp golden

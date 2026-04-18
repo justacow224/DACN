@@ -1,7 +1,8 @@
 # ==============================================================================
 # Unified Simulation Script: Direct TB
 # ==============================================================================
-# CLEANUP (if locked): taskkill /F /IM xsimk.exe /T; taskkill /F /IM xsim.exe /T; taskkill /F /IM vivado.bat /T; taskkill /F /IM vivado.exe /T
+# CLEANUP (if locked): taskkill /F /IM xsimk.exe /T & taskkill /F /IM xsim.exe /T & taskkill /F /IM vivado.bat /T & taskkill /F /IM vivado.exe /T
+
 #
 # EXECUTION (CMD): 
 # cd /d D:\HCMUT\Year_4\252\CA\Source\DACN && "C:\Xilinx\2025.1\Vivado\bin\vivado.bat" -mode batch -source verilog_ML_KEM/scripts/KeyGen/sim_direct.tcl -tclargs D:/HCMUT/Year_4/252/CA/Vivado/verilog_ML_KEM/verilog_ML_KEM.xpr
@@ -57,7 +58,12 @@ for {set t 0} {$t < 5} {incr t} {
 
 if {!$launched} {
     puts "ERROR: launch_simulation failed after retries."
-    puts "HINT: Ensure no other Vivado instance is locking the simulation files."
+    if {[string match "*[VRFC*" $launch_err] || [string match "*[XSIM*" $launch_err]} {
+        puts "HINT: This looks like a Compilation (*VRFC*) or Elaboration (*XSIM*) error rather than a file lock."
+        puts "ACTION: Check the detailed log above for syntax errors or missing declarations in Testbench/RTL."
+    } else {
+        puts "HINT: Ensure no other Vivado instance is locking the simulation files."
+    }
     puts "DETAIL: $launch_err"
     close_project
     exit 5

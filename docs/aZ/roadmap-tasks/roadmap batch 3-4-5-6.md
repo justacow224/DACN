@@ -82,16 +82,24 @@ m = Compress_1(diff)                                        // poly_compress d=1
 
 > **Không cần** `keccak_sponge_top` — Decrypt không hashing.
 
-## BRAM nội bộ
+## BRAM nội bộ (Phase-2 completed)
 
 | Tên | Số lượng | Kích thước | Mục đích |
 |-----|---------|-----------|----------|
-| `s_hat[0..2]` | 3× BRAM18K | 256×16 mỗi cái | Khóa bí mật (decode từ dk) |
-| `u_hat[0..2]` | 3× BRAM18K | 256×16 mỗi cái | NTT(u) |
-| `acc` | 1× BRAM18K | 256×16 | Accumulator cho inner product |
-| **Tổng** | **7× BRAM18K** | | |
+| `dk_buf` + `ct_buf` | 2× BRAM18K | 1152×8 + 1088×8 | Byte buffers (preload interface) |
+| `s_hat_mem0/1` | 2× BRAM18K | 384×16 mỗi bank | Khóa bí mật (banked a0/a1) |
+| `u_poly_mem0/1` | 2× BRAM18K | 384×16 mỗi bank | Decompressed u (banked a0/a1) |
+| `u_hat_mem` | 1× BRAM18K | 768×16 | NTT(u) |
+| `v_mem0/1` | 2× BRAM18K | 128×16 mỗi bank | Decompressed v (banked a0/a1) |
+| `acc_mem` | 1× BRAM18K | 256×16 | Accumulator |
+| `tmp_mem` | 1× BRAM18K | 256×16 | Pointwise temp |
+| `w_mem` | 1× BRAM18K | 256×16 | INTT output |
+| `diff_mem0/1` | 2× BRAM18K | 128×16 mỗi bank | v - w result (banked a0/a1) |
+| IP cores (NTT+INVNTT+PW+AddSub) | 12× BRAM18K | 128×16 each | Explicit `bram_sdp_128x16` wrappers |
+| Auto-inferred | 2× BRAM18K | | Vivado step_reg_rep |
+| **Tổng standalone** | **28× RAMB18E2** | | |
 
-Thêm byte buffer cho `ct_in` (1088 bytes) và `v_poly` (256×16) — tùy kiến trúc I/O.
+> **Đã hoàn thành Phase-2:** Memory process tách riêng khỏi FSM, synchronous read với 9 prefetch states. `dk_buf`/`ct_buf` confirmed BRAM inference.
 
 ## FSM States
 
@@ -141,8 +149,8 @@ S_DONE
 | 1× INTT | 900 |
 | 1× Sub | 130 |
 | 1× compress_1 | 150 |
-| Pump overhead | ~5,000 |
-| **Tổng** | **~11,000 cycles → ~110 µs** |
+| Pump overhead (sequential read-back) | ~12,000 |
+| **Tổng** | **~21,060 cycles → ~211 µs** (measured: post-Phase-2, 100/100 KAT PASS) |
 
 ## Verification
 
@@ -531,12 +539,12 @@ wire [7:0] k_out = (K_prime & mask) | (K_reject & ~mask);
 | Bước | Cycles |
 |------|--------|
 | Unpack dk | ~3,000 |
-| Phase 1: Decrypt | ~11,000 |
+| Phase 1: Decrypt | ~21,000 |
 | Hash G + Hash J | ~3,500 |
 | Phase 2: Re-Encrypt | ~80,000 |
 | Compare (1088 bytes) | ~1,100 |
 | Output + Zeroize | ~500 |
-| **Tổng** | **~99,000 cycles → ~990 µs** |
+| **Tổng** | **~109,000 cycles → ~1,090 µs** |
 
 ## Verification
 
@@ -701,10 +709,10 @@ sk_buf = allocate(shape=(2400,), dtype=np.uint8)
 
 | Batch | Module | Est. Lines | Est. Cycles | Dependency |
 |-------|--------|-----------|-------------|------------|
-| 3 | `kpke_decrypt.v` | ~500 | ~11,000 | Batch 1 |
+| 3 | `kpke_decrypt.v` | ~963 | ~21,060 | Batch 1 |
 | 4a | `kpke_encrypt.v` | ~900 | ~80,000 | Batch 1,2,3 |
 | 4b | `ml_kem_encaps.v` | ~300 | ~82,000 | Batch 4a |
-| 5 | `ml_kem_decaps.v` | ~1200 | ~99,000 | Batch 3,4 |
+| 5 | `ml_kem_decaps.v` | ~1200 | ~109,000 | Batch 3,4 |
 | 6 | `ml_kem_top.v` + AXI | ~600 | N/A | All |
 
 > [!TIP]

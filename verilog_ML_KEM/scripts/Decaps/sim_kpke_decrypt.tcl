@@ -29,6 +29,17 @@ puts "INFO: Running simulation in isolated directory: $run_dir"
 # 2. Open project and harden simulation
 open_project $xpr_path
 
+# Ensure newly introduced BRAM wrapper exists in project sources.
+set bram_wrap_file [file normalize [file join $script_dir ".." ".." "sources_1" "new" "bram_sdp_128x16.v"]]
+if {[file exists $bram_wrap_file]} {
+    if {[llength [get_files -quiet $bram_wrap_file]] == 0} {
+        puts "INFO: Adding missing source file to project: $bram_wrap_file"
+        add_files -norecurse $bram_wrap_file
+    }
+} else {
+    puts "WARNING: BRAM wrapper source not found: $bram_wrap_file"
+}
+
 # Force close any existing simulation sessions in this project to prevent hangs
 if {[llength [current_sim -quiet]] > 0} {
     puts "INFO: Closing previous simulation session..."

@@ -236,32 +236,26 @@ module inv_ntt_top (
     assign host_dout = (host_bank_reg == 1'b0) ? ram0_dout : ram1_dout;
 
     // =================================================================
-    // 7. DUAL-PORT BRAM INFERENCE
+    // 7. RAM BANKS (explicit BRAM wrapper, 1R1W, 1-cycle read)
     // =================================================================
-    reg [15:0] BRAM_0 [0:127];
-    reg [15:0] BRAM_1 [0:127];
+    bram_sdp_128x16 u_ram_bank0 (
+        .clk(clk),
+        .rst_n(rst_n),
+        .raddr(sys_ram0_raddr),
+        .waddr(sys_ram0_waddr),
+        .we(sys_ram0_we),
+        .din(sys_ram0_din),
+        .dout(ram0_dout)
+    );
 
-    reg [15:0] ram0_dout_reg;
-    reg [15:0] ram1_dout_reg;
-
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            ram0_dout_reg <= 16'd0;
-        end else begin
-            ram0_dout_reg <= BRAM_0[sys_ram0_raddr];
-            if (sys_ram0_we) BRAM_0[sys_ram0_waddr] <= sys_ram0_din;
-        end
-    end
-    assign ram0_dout = ram0_dout_reg;
-
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            ram1_dout_reg <= 16'd0;
-        end else begin
-            ram1_dout_reg <= BRAM_1[sys_ram1_raddr];
-            if (sys_ram1_we) BRAM_1[sys_ram1_waddr] <= sys_ram1_din;
-        end
-    end
-    assign ram1_dout = ram1_dout_reg;
+    bram_sdp_128x16 u_ram_bank1 (
+        .clk(clk),
+        .rst_n(rst_n),
+        .raddr(sys_ram1_raddr),
+        .waddr(sys_ram1_waddr),
+        .we(sys_ram1_we),
+        .din(sys_ram1_din),
+        .dout(ram1_dout)
+    );
 
 endmodule

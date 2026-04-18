@@ -134,8 +134,8 @@ module tb_ml_kem_keygen();
                 $display("[PW_START] i=%0d j=%0d t=%0t", dut.i_idx, dut.j_idx, $time);
                 if (dut.i_idx == 0 && dut.j_idx == 0) begin
                     $display("[PW_IN_MEM] A0=%h A1=%h B0=%h B1=%h t=%0t",
-                        dut.u_pw.BRAM_A_0[0], dut.u_pw.BRAM_A_1[0],
-                        dut.u_pw.BRAM_B_0[0], dut.u_pw.BRAM_B_1[0], $time);
+                        dut.u_pw.u_ram_a0.mem[0], dut.u_pw.u_ram_a1.mem[0],
+                        dut.u_pw.u_ram_b0.mem[0], dut.u_pw.u_ram_b1.mem[0], $time);
                 end
             end
 
@@ -143,7 +143,7 @@ module tb_ml_kem_keygen();
                 $display("[PW_DONE] i=%0d j=%0d t=%0t", dut.i_idx, dut.j_idx, $time);
                 if (dut.i_idx == 0 && dut.j_idx == 0) begin
                     $display("[PW_OUT_MEM] O0=%h O1=%h t=%0t",
-                        dut.u_pw.BRAM_A_0[0], dut.u_pw.BRAM_A_1[0], $time);
+                        dut.u_pw.u_ram_a0.mem[0], dut.u_pw.u_ram_a1.mem[0], $time);
                 end
             end
 

@@ -191,53 +191,45 @@ module poly_add_sub_top (
                                                 ((host_bank_reg == 1'b0) ? ram_b0_dout : ram_b1_dout);
 
     // RAM A (Accumulator / Output)
-    reg [15:0] BRAM_A_0 [0:127];
-    reg [15:0] BRAM_A_1 [0:127];
-    reg [15:0] ram_a0_dout_reg, ram_a1_dout_reg;
+    bram_sdp_128x16 u_ram_a0 (
+        .clk(clk),
+        .rst_n(rst_n),
+        .raddr(sys_ram_raddr),
+        .waddr(sys_ram_waddr),
+        .we(sys_ram_a0_we),
+        .din(sys_ram_a0_din),
+        .dout(ram_a0_dout)
+    );
 
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            ram_a0_dout_reg <= 16'd0;
-        end else begin
-            ram_a0_dout_reg <= BRAM_A_0[sys_ram_raddr];
-            if (sys_ram_a0_we) BRAM_A_0[sys_ram_waddr] <= sys_ram_a0_din;
-        end
-    end
-    assign ram_a0_dout = ram_a0_dout_reg;
-
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            ram_a1_dout_reg <= 16'd0;
-        end else begin
-            ram_a1_dout_reg <= BRAM_A_1[sys_ram_raddr];
-            if (sys_ram_a1_we) BRAM_A_1[sys_ram_waddr] <= sys_ram_a1_din;
-        end
-    end
-    assign ram_a1_dout = ram_a1_dout_reg;
+    bram_sdp_128x16 u_ram_a1 (
+        .clk(clk),
+        .rst_n(rst_n),
+        .raddr(sys_ram_raddr),
+        .waddr(sys_ram_waddr),
+        .we(sys_ram_a1_we),
+        .din(sys_ram_a1_din),
+        .dout(ram_a1_dout)
+    );
 
     // RAM B (Read-Only during calculation)
-    reg [15:0] BRAM_B_0 [0:127];
-    reg [15:0] BRAM_B_1 [0:127];
-    reg [15:0] ram_b0_dout_reg, ram_b1_dout_reg;
+    bram_sdp_128x16 u_ram_b0 (
+        .clk(clk),
+        .rst_n(rst_n),
+        .raddr(sys_ram_raddr),
+        .waddr(sys_ram_waddr),
+        .we(sys_ram_b0_we),
+        .din(host_din),
+        .dout(ram_b0_dout)
+    );
 
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            ram_b0_dout_reg <= 16'd0;
-        end else begin
-            ram_b0_dout_reg <= BRAM_B_0[sys_ram_raddr];
-            if (sys_ram_b0_we) BRAM_B_0[sys_ram_waddr] <= host_din;
-        end
-    end
-    assign ram_b0_dout = ram_b0_dout_reg;
-
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            ram_b1_dout_reg <= 16'd0;
-        end else begin
-            ram_b1_dout_reg <= BRAM_B_1[sys_ram_raddr];
-            if (sys_ram_b1_we) BRAM_B_1[sys_ram_waddr] <= host_din;
-        end
-    end
-    assign ram_b1_dout = ram_b1_dout_reg;
+    bram_sdp_128x16 u_ram_b1 (
+        .clk(clk),
+        .rst_n(rst_n),
+        .raddr(sys_ram_raddr),
+        .waddr(sys_ram_waddr),
+        .we(sys_ram_b1_we),
+        .din(host_din),
+        .dout(ram_b1_dout)
+    );
 
 endmodule

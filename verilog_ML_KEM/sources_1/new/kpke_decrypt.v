@@ -80,6 +80,17 @@ module kpke_decrypt (
 
     localparam [5:0] S_DONE               = 6'd37;
 
+    // Prefetch states for synchronous internal memory reads
+    localparam [5:0] S_NTT_LOAD_PREF      = 6'd38;
+    localparam [5:0] S_PW_LOAD_A_PREF     = 6'd39;
+    localparam [5:0] S_PW_LOAD_B_PREF     = 6'd40;
+    localparam [5:0] S_ADDACC_LOAD_A_PREF = 6'd41;
+    localparam [5:0] S_ADDACC_LOAD_B_PREF = 6'd42;
+    localparam [5:0] S_INTT_LOAD_PREF     = 6'd43;
+    localparam [5:0] S_SUB_LOAD_A_PREF    = 6'd44;
+    localparam [5:0] S_SUB_LOAD_B_PREF    = 6'd45;
+    localparam [5:0] S_COMP_PREF          = 6'd46;
+
     reg [5:0] state;
 
     // =============================================================
@@ -87,20 +98,26 @@ module kpke_decrypt (
     // =============================================================
     (* ram_style = "block" *) reg [7:0] dk_buf  [0:1151];
     (* ram_style = "block" *) reg [7:0] ct_buf  [0:1087];
-    (* ram_style = "block" *) reg [7:0] msg_buf [0:31];
+    reg [7:0] msg_buf [0:31];
 
     // =============================================================
     // Internal memories
     // =============================================================
-    (* ram_style = "block" *) reg [15:0] s_hat_mem   [0:767];  // 3 * 256
-    (* ram_style = "block" *) reg [15:0] u_poly_mem  [0:767];  // decompressed u
-    (* ram_style = "block" *) reg [15:0] u_hat_mem   [0:767];  // NTT(u)
+    // Banked memories for dual-coefficient writes and sync reads
+    (* ram_style = "block" *) reg [15:0] s_hat_mem0  [0:383];
+    (* ram_style = "block" *) reg [15:0] s_hat_mem1  [0:383];
+    (* ram_style = "block" *) reg [15:0] u_poly_mem0 [0:383];
+    (* ram_style = "block" *) reg [15:0] u_poly_mem1 [0:383];
+    (* ram_style = "block" *) reg [15:0] v_mem0      [0:127];
+    (* ram_style = "block" *) reg [15:0] v_mem1      [0:127];
+    (* ram_style = "block" *) reg [15:0] diff_mem0   [0:127];
+    (* ram_style = "block" *) reg [15:0] diff_mem1   [0:127];
 
-    (* ram_style = "block" *) reg [15:0] v_mem       [0:255];
+    // Single-write memories with synchronous read datapaths
+    (* ram_style = "block" *) reg [15:0] u_hat_mem   [0:767];
     (* ram_style = "block" *) reg [15:0] acc_mem     [0:255];
     (* ram_style = "block" *) reg [15:0] tmp_mem     [0:255];
     (* ram_style = "block" *) reg [15:0] w_mem       [0:255];
-    (* ram_style = "block" *) reg [15:0] diff_mem    [0:255];
 
     // =============================================================
     // Control registers / indices
@@ -113,7 +130,30 @@ module kpke_decrypt (
     reg [1:0] pw_idx;
 
     reg [7:0] coeff_idx;
+    wire [7:0] coeff_idx_next;
     integer clr_i;
+
+    reg [15:0] s_hat_rd_a0, s_hat_rd_a1;
+    reg [15:0] u_poly_rd_a0, u_poly_rd_a1;
+    reg [15:0] u_hat_rdata;
+    reg [15:0] v_rd_a0, v_rd_a1;
+    reg [15:0] acc_rdata;
+    reg [15:0] tmp_rdata;
+    reg [15:0] w_rdata;
+    reg [15:0] diff_rd_a0, diff_rd_a1;
+
+    wire [8:0] s_hat_rpair_addr;
+    wire [8:0] u_poly_rpair_addr;
+    wire [9:0] u_hat_raddr;
+    wire [6:0] v_rpair_addr;
+    wire [7:0] acc_raddr;
+    wire [7:0] tmp_raddr;
+    wire [7:0] w_raddr;
+    wire [6:0] diff_rpair_addr;
+
+    wire [15:0] s_hat_load_din;
+    wire [15:0] u_poly_load_din;
+    wire [15:0] v_load_din;
 
     // =============================================================
     // 1) poly_frombytes (decode s_hat)
@@ -181,6 +221,33 @@ module kpke_decrypt (
         .coeff_a1(decomp_coeff_a1)
     );
 
+    assign coeff_idx_next = (coeff_idx == 8'd255) ? 8'd255 : (coeff_idx + 8'd1);
+
+    assign s_hat_rpair_addr = (state == S_PW_LOAD_A_PREF) ? {pw_idx, 7'd0} :
+                              (state == S_PW_LOAD_A_LOOP) ? {pw_idx, coeff_idx_next[7:1]} :
+                              9'd0;
+    assign u_poly_rpair_addr = (state == S_NTT_LOAD_PREF) ? {ntt_idx, 7'd0} :
+                               (state == S_NTT_LOAD_LOOP) ? {ntt_idx, coeff_idx_next[7:1]} :
+                               9'd0;
+    assign u_hat_raddr = (state == S_PW_LOAD_B_PREF) ? {pw_idx, 8'd0} :
+                         (state == S_PW_LOAD_B_LOOP) ? {pw_idx, coeff_idx_next} :
+                         10'd0;
+    assign v_rpair_addr = (state == S_SUB_LOAD_A_PREF) ? 7'd0 :
+                          (state == S_SUB_LOAD_A_LOOP) ? coeff_idx_next[7:1] :
+                          7'd0;
+    assign acc_raddr = ((state == S_ADDACC_LOAD_A_PREF) || (state == S_INTT_LOAD_PREF)) ? 8'd0 :
+                       ((state == S_ADDACC_LOAD_A_LOOP) || (state == S_INTT_LOAD_LOOP)) ? coeff_idx_next :
+                       8'd0;
+    assign tmp_raddr = (state == S_ADDACC_LOAD_B_PREF) ? 8'd0 :
+                       (state == S_ADDACC_LOAD_B_LOOP) ? coeff_idx_next :
+                       8'd0;
+    assign w_raddr = (state == S_SUB_LOAD_B_PREF) ? 8'd0 :
+                     (state == S_SUB_LOAD_B_LOOP) ? coeff_idx_next :
+                     8'd0;
+    assign s_hat_load_din = coeff_idx[0] ? s_hat_rd_a1 : s_hat_rd_a0;
+    assign u_poly_load_din = coeff_idx[0] ? u_poly_rd_a1 : u_poly_rd_a0;
+    assign v_load_din = coeff_idx[0] ? v_rd_a1 : v_rd_a0;
+
     // =============================================================
     // 3) ntt_top (for u -> u_hat)
     // =============================================================
@@ -194,7 +261,7 @@ module kpke_decrypt (
     assign ntt_start     = (state == S_NTT_START);
     assign ntt_host_we   = (state == S_NTT_LOAD_LOOP);
     assign ntt_host_addr = ((state == S_NTT_LOAD_LOOP) || (state == S_NTT_READ_REQ)) ? coeff_idx : 8'd0;
-    assign ntt_host_din  = u_poly_mem[{ntt_idx, coeff_idx}];
+    assign ntt_host_din  = u_poly_load_din;
 
     ntt_top u_ntt (
         .clk(clk),
@@ -227,8 +294,8 @@ module kpke_decrypt (
                            (state == S_PW_LOAD_B_LOOP) ||
                            (state == S_PW_READ_REQ)) ? coeff_idx : 8'd0;
 
-    assign pw_host_din = (state == S_PW_LOAD_A_LOOP) ? s_hat_mem[{pw_idx, coeff_idx}] :
-                         (state == S_PW_LOAD_B_LOOP) ? u_hat_mem[{pw_idx, coeff_idx}] :
+    assign pw_host_din = (state == S_PW_LOAD_A_LOOP) ? s_hat_load_din :
+                         (state == S_PW_LOAD_B_LOOP) ? u_hat_rdata :
                          16'd0;
 
     poly_pointwise_top u_pw (
@@ -280,10 +347,10 @@ module kpke_decrypt (
                             (state == S_SUB_LOAD_B_LOOP)    ||
                             (state == S_SUB_READ_REQ)) ? coeff_idx : 8'd0;
 
-    assign add_host_din = (state == S_ADDACC_LOAD_A_LOOP) ? acc_mem[coeff_idx] :
-                          (state == S_ADDACC_LOAD_B_LOOP) ? tmp_mem[coeff_idx] :
-                          (state == S_SUB_LOAD_A_LOOP)    ? v_mem[coeff_idx]   :
-                          (state == S_SUB_LOAD_B_LOOP)    ? w_mem[coeff_idx]   :
+    assign add_host_din = (state == S_ADDACC_LOAD_A_LOOP) ? acc_rdata :
+                          (state == S_ADDACC_LOAD_B_LOOP) ? tmp_rdata :
+                          (state == S_SUB_LOAD_A_LOOP)    ? v_load_din :
+                          (state == S_SUB_LOAD_B_LOOP)    ? w_rdata :
                           16'd0;
 
     poly_add_sub_top u_add_sub (
@@ -312,7 +379,7 @@ module kpke_decrypt (
     assign intt_start     = (state == S_INTT_START);
     assign intt_host_we   = (state == S_INTT_LOAD_LOOP);
     assign intt_host_addr = ((state == S_INTT_LOAD_LOOP) || (state == S_INTT_READ_REQ)) ? coeff_idx : 8'd0;
-    assign intt_host_din  = acc_mem[coeff_idx];
+    assign intt_host_din  = acc_rdata;
 
     inv_ntt_top u_inv_ntt (
         .clk(clk),
@@ -337,6 +404,9 @@ module kpke_decrypt (
     wire [8:0]  comp_byte_addr;
     wire [7:0]  comp_byte_dout;
 
+    assign diff_rpair_addr = (state == S_COMP_PREF) ? 7'd0 :
+                             ((state == S_COMP_START) || (state == S_COMP_WAIT)) ? comp_coeff_addr :
+                             7'd0;
     assign comp_start    = (state == S_COMP_START);
 
     poly_compress u_compress (
@@ -364,13 +434,137 @@ module kpke_decrypt (
     // =============================================================
     reg [7:0]  fromb_byte_din_r;
     reg [7:0]  decomp_byte_din_r;
-    reg [15:0] comp_coeff_a0_r;
-    reg [15:0] comp_coeff_a1_r;
 
     assign fromb_byte_din = fromb_byte_din_r;
     assign decomp_byte_din = decomp_byte_din_r;
-    assign comp_coeff_a0 = comp_coeff_a0_r;
-    assign comp_coeff_a1 = comp_coeff_a1_r;
+    assign comp_coeff_a0 = diff_rd_a0;
+    assign comp_coeff_a1 = diff_rd_a1;
+
+    // Byte buffers: keep RAM path fully synchronous (no async reset on RAM access)
+    // to preserve BRAM inference for dk_buf/ct_buf.
+    always @(posedge clk) begin
+        if (in_we && !busy) begin
+            if (!in_sel) begin
+                if (in_addr < 11'd1152) begin
+                    dk_buf[in_addr] <= in_wdata;
+                end
+            end else begin
+                if (in_addr < 11'd1088) begin
+                    ct_buf[in_addr] <= in_wdata;
+                end
+            end
+        end
+        fromb_byte_din_r <= dk_buf[fromb_abs_addr];
+        decomp_byte_din_r <= ct_buf[decomp_abs_addr];
+    end
+
+    // =============================================================
+    // Internal memory processes (separated from FSM control)
+    // =============================================================
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            s_hat_rd_a0 <= 16'd0;
+            s_hat_rd_a1 <= 16'd0;
+        end else begin
+            s_hat_rd_a0 <= s_hat_mem0[s_hat_rpair_addr];
+            s_hat_rd_a1 <= s_hat_mem1[s_hat_rpair_addr];
+            if (fromb_coeff_we) begin
+                s_hat_mem0[{sk_idx, fromb_coeff_addr}] <= fromb_coeff_a0;
+                s_hat_mem1[{sk_idx, fromb_coeff_addr}] <= fromb_coeff_a1;
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            u_poly_rd_a0 <= 16'd0;
+            u_poly_rd_a1 <= 16'd0;
+        end else begin
+            u_poly_rd_a0 <= u_poly_mem0[u_poly_rpair_addr];
+            u_poly_rd_a1 <= u_poly_mem1[u_poly_rpair_addr];
+            if (decomp_coeff_we && !dec_phase_v) begin
+                u_poly_mem0[{dec_u_idx, decomp_coeff_addr}] <= decomp_coeff_a0;
+                u_poly_mem1[{dec_u_idx, decomp_coeff_addr}] <= decomp_coeff_a1;
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            u_hat_rdata <= 16'd0;
+        end else begin
+            u_hat_rdata <= u_hat_mem[u_hat_raddr];
+            if (state == S_NTT_READ_CAP) begin
+                u_hat_mem[{ntt_idx, coeff_idx}] <= ntt_host_dout;
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            v_rd_a0 <= 16'd0;
+            v_rd_a1 <= 16'd0;
+        end else begin
+            v_rd_a0 <= v_mem0[v_rpair_addr];
+            v_rd_a1 <= v_mem1[v_rpair_addr];
+            if (decomp_coeff_we && dec_phase_v) begin
+                v_mem0[decomp_coeff_addr] <= decomp_coeff_a0;
+                v_mem1[decomp_coeff_addr] <= decomp_coeff_a1;
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            acc_rdata <= 16'd0;
+        end else begin
+            acc_rdata <= acc_mem[acc_raddr];
+            if ((state == S_PW_READ_CAP) && (pw_idx == 2'd0)) begin
+                acc_mem[coeff_idx] <= pw_host_dout;
+            end else if (state == S_ADDACC_READ_CAP) begin
+                acc_mem[coeff_idx] <= add_host_dout;
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            tmp_rdata <= 16'd0;
+        end else begin
+            tmp_rdata <= tmp_mem[tmp_raddr];
+            if ((state == S_PW_READ_CAP) && (pw_idx != 2'd0)) begin
+                tmp_mem[coeff_idx] <= pw_host_dout;
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            w_rdata <= 16'd0;
+        end else begin
+            w_rdata <= w_mem[w_raddr];
+            if (state == S_INTT_READ_CAP) begin
+                w_mem[coeff_idx] <= intt_host_dout;
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            diff_rd_a0 <= 16'd0;
+            diff_rd_a1 <= 16'd0;
+        end else begin
+            diff_rd_a0 <= diff_mem0[diff_rpair_addr];
+            diff_rd_a1 <= diff_mem1[diff_rpair_addr];
+            if (state == S_SUB_READ_CAP) begin
+                if (coeff_idx[0]) begin
+                    diff_mem1[coeff_idx[7:1]] <= add_host_dout;
+                end else begin
+                    diff_mem0[coeff_idx[7:1]] <= add_host_dout;
+                end
+            end
+        end
+    end
 
     // =============================================================
     // Main FSM
@@ -383,10 +577,6 @@ module kpke_decrypt (
             m_out       <= 256'd0;
             out_rdata   <= 8'd0;
             out_valid   <= 1'b0;
-            fromb_byte_din_r <= 8'd0;
-            decomp_byte_din_r <= 8'd0;
-            comp_coeff_a0_r <= 16'd0;
-            comp_coeff_a1_r <= 16'd0;
             for (clr_i = 0; clr_i < 32; clr_i = clr_i + 1) begin
                 msg_buf[clr_i] <= 8'd0;
             end
@@ -401,65 +591,10 @@ module kpke_decrypt (
             done      <= 1'b0;
             out_valid <= 1'b0;
 
-            // 1-cycle registered readback to match module-side timing assumptions
-            fromb_byte_din_r <= dk_buf[fromb_abs_addr];
-            decomp_byte_din_r <= ct_buf[decomp_abs_addr];
-            comp_coeff_a0_r <= diff_mem[{comp_coeff_addr, 1'b0}];
-            comp_coeff_a1_r <= diff_mem[{comp_coeff_addr, 1'b1}];
-
-            if (in_we && !busy) begin
-                if (!in_sel) begin
-                    if (in_addr < 11'd1152) dk_buf[in_addr] <= in_wdata;
-                end else begin
-                    if (in_addr < 11'd1088) ct_buf[in_addr] <= in_wdata;
-                end
-            end
-
             if (out_rd) begin
                 out_valid <= 1'b1;
                 if (out_addr <= 5'd31) out_rdata <= msg_buf[out_addr];
                 else                   out_rdata <= 8'd0;
-            end
-
-            // -----------------------------------------------------
-            // Capture datapath outputs
-            // -----------------------------------------------------
-            if (fromb_coeff_we) begin
-                s_hat_mem[{sk_idx, fromb_coeff_addr, 1'b0}] <= fromb_coeff_a0;
-                s_hat_mem[{sk_idx, fromb_coeff_addr, 1'b1}] <= fromb_coeff_a1;
-            end
-
-            if (decomp_coeff_we) begin
-                if (dec_phase_v) begin
-                    v_mem[{decomp_coeff_addr, 1'b0}] <= decomp_coeff_a0;
-                    v_mem[{decomp_coeff_addr, 1'b1}] <= decomp_coeff_a1;
-                end else begin
-                    u_poly_mem[{dec_u_idx, decomp_coeff_addr, 1'b0}] <= decomp_coeff_a0;
-                    u_poly_mem[{dec_u_idx, decomp_coeff_addr, 1'b1}] <= decomp_coeff_a1;
-                end
-            end
-
-            if (state == S_NTT_READ_CAP) begin
-                u_hat_mem[{ntt_idx, coeff_idx}] <= ntt_host_dout;
-            end
-
-            if (state == S_PW_READ_CAP) begin
-                if (pw_idx == 2'd0)
-                    acc_mem[coeff_idx] <= pw_host_dout;
-                else
-                    tmp_mem[coeff_idx] <= pw_host_dout;
-            end
-
-            if (state == S_ADDACC_READ_CAP) begin
-                acc_mem[coeff_idx] <= add_host_dout;
-            end
-
-            if (state == S_INTT_READ_CAP) begin
-                w_mem[coeff_idx] <= intt_host_dout;
-            end
-
-            if (state == S_SUB_READ_CAP) begin
-                diff_mem[coeff_idx] <= add_host_dout;
             end
 
             if ((state == S_COMP_WAIT) && comp_byte_we && (comp_byte_addr < 9'd32)) begin
@@ -535,11 +670,16 @@ module kpke_decrypt (
                     if (decomp_done) begin
                         ntt_idx   <= 2'd0;
                         coeff_idx <= 8'd0;
-                        state     <= S_NTT_LOAD_LOOP;
+                        state     <= S_NTT_LOAD_PREF;
                     end
                 end
 
                 // NTT(u[i]) loop
+                S_NTT_LOAD_PREF: begin
+                    coeff_idx <= 8'd0;
+                    state     <= S_NTT_LOAD_LOOP;
+                end
+
                 S_NTT_LOAD_LOOP: begin
                     if (coeff_idx == 8'd255) begin
                         coeff_idx <= 8'd0;
@@ -569,10 +709,10 @@ module kpke_decrypt (
                         coeff_idx <= 8'd0;
                         if (ntt_idx == 2'd2) begin
                             pw_idx <= 2'd0;
-                            state  <= S_PW_LOAD_A_LOOP;
+                            state  <= S_PW_LOAD_A_PREF;
                         end else begin
                             ntt_idx <= ntt_idx + 2'd1;
-                            state   <= S_NTT_LOAD_LOOP;
+                            state   <= S_NTT_LOAD_PREF;
                         end
                     end else begin
                         coeff_idx <= coeff_idx + 8'd1;
@@ -581,13 +721,23 @@ module kpke_decrypt (
                 end
 
                 // Pointwise s_hat[i] * u_hat[i]
+                S_PW_LOAD_A_PREF: begin
+                    coeff_idx <= 8'd0;
+                    state     <= S_PW_LOAD_A_LOOP;
+                end
+
                 S_PW_LOAD_A_LOOP: begin
                     if (coeff_idx == 8'd255) begin
                         coeff_idx <= 8'd0;
-                        state     <= S_PW_LOAD_B_LOOP;
+                        state     <= S_PW_LOAD_B_PREF;
                     end else begin
                         coeff_idx <= coeff_idx + 8'd1;
                     end
+                end
+
+                S_PW_LOAD_B_PREF: begin
+                    coeff_idx <= 8'd0;
+                    state     <= S_PW_LOAD_B_LOOP;
                 end
 
                 S_PW_LOAD_B_LOOP: begin
@@ -619,9 +769,9 @@ module kpke_decrypt (
                         coeff_idx <= 8'd0;
                         if (pw_idx == 2'd0) begin
                             pw_idx <= 2'd1;
-                            state  <= S_PW_LOAD_A_LOOP;
+                            state  <= S_PW_LOAD_A_PREF;
                         end else begin
-                            state <= S_ADDACC_LOAD_A_LOOP;
+                            state <= S_ADDACC_LOAD_A_PREF;
                         end
                     end else begin
                         coeff_idx <= coeff_idx + 8'd1;
@@ -630,13 +780,23 @@ module kpke_decrypt (
                 end
 
                 // acc += tmp for i=1,2
+                S_ADDACC_LOAD_A_PREF: begin
+                    coeff_idx <= 8'd0;
+                    state     <= S_ADDACC_LOAD_A_LOOP;
+                end
+
                 S_ADDACC_LOAD_A_LOOP: begin
                     if (coeff_idx == 8'd255) begin
                         coeff_idx <= 8'd0;
-                        state     <= S_ADDACC_LOAD_B_LOOP;
+                        state     <= S_ADDACC_LOAD_B_PREF;
                     end else begin
                         coeff_idx <= coeff_idx + 8'd1;
                     end
+                end
+
+                S_ADDACC_LOAD_B_PREF: begin
+                    coeff_idx <= 8'd0;
+                    state     <= S_ADDACC_LOAD_B_LOOP;
                 end
 
                 S_ADDACC_LOAD_B_LOOP: begin
@@ -667,10 +827,10 @@ module kpke_decrypt (
                     if (coeff_idx == 8'd255) begin
                         coeff_idx <= 8'd0;
                         if (pw_idx == 2'd2) begin
-                            state <= S_INTT_LOAD_LOOP;
+                            state <= S_INTT_LOAD_PREF;
                         end else begin
                             pw_idx <= pw_idx + 2'd1;
-                            state  <= S_PW_LOAD_A_LOOP;
+                            state  <= S_PW_LOAD_A_PREF;
                         end
                     end else begin
                         coeff_idx <= coeff_idx + 8'd1;
@@ -679,6 +839,11 @@ module kpke_decrypt (
                 end
 
                 // INTT(acc) -> w
+                S_INTT_LOAD_PREF: begin
+                    coeff_idx <= 8'd0;
+                    state     <= S_INTT_LOAD_LOOP;
+                end
+
                 S_INTT_LOAD_LOOP: begin
                     if (coeff_idx == 8'd255) begin
                         coeff_idx <= 8'd0;
@@ -706,7 +871,7 @@ module kpke_decrypt (
                 S_INTT_READ_CAP: begin
                     if (coeff_idx == 8'd255) begin
                         coeff_idx <= 8'd0;
-                        state     <= S_SUB_LOAD_A_LOOP;
+                        state     <= S_SUB_LOAD_A_PREF;
                     end else begin
                         coeff_idx <= coeff_idx + 8'd1;
                         state     <= S_INTT_READ_REQ;
@@ -714,13 +879,23 @@ module kpke_decrypt (
                 end
 
                 // diff = v - w
+                S_SUB_LOAD_A_PREF: begin
+                    coeff_idx <= 8'd0;
+                    state     <= S_SUB_LOAD_A_LOOP;
+                end
+
                 S_SUB_LOAD_A_LOOP: begin
                     if (coeff_idx == 8'd255) begin
                         coeff_idx <= 8'd0;
-                        state     <= S_SUB_LOAD_B_LOOP;
+                        state     <= S_SUB_LOAD_B_PREF;
                     end else begin
                         coeff_idx <= coeff_idx + 8'd1;
                     end
+                end
+
+                S_SUB_LOAD_B_PREF: begin
+                    coeff_idx <= 8'd0;
+                    state     <= S_SUB_LOAD_B_LOOP;
                 end
 
                 S_SUB_LOAD_B_LOOP: begin
@@ -749,7 +924,7 @@ module kpke_decrypt (
 
                 S_SUB_READ_CAP: begin
                     if (coeff_idx == 8'd255) begin
-                        state <= S_COMP_START;
+                        state <= S_COMP_PREF;
                     end else begin
                         coeff_idx <= coeff_idx + 8'd1;
                         state     <= S_SUB_READ_REQ;
@@ -757,6 +932,10 @@ module kpke_decrypt (
                 end
 
                 // Compress_1(diff) -> m
+                S_COMP_PREF: begin
+                    state <= S_COMP_START;
+                end
+
                 S_COMP_START: begin
                     state <= S_COMP_WAIT;
                 end
