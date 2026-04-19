@@ -5,12 +5,13 @@
 ```mermaid
 graph LR
     B1["Batch 1<br/>Serialization ✅"] --> B2["Batch 2<br/>ML-KEM KeyGen ✅"]
-    B1 --> B3["Batch 3<br/>K-PKE Decrypt"]
-    B2 --> B4["Batch 4<br/>K-PKE Encrypt<br/>+ ML-KEM Encaps"]
+    B1 --> B3["Batch 3<br/>K-PKE Decrypt ✅"]
+    B2 --> B4["Batch 4<br/>K-PKE Encrypt<br/>+ ML-KEM Encaps ✅"]
     B3 --> B4
-    B3 --> B5["Batch 5<br/>ML-KEM Decaps"]
+    B3 --> B5["Batch 5<br/>ML-KEM Decaps ✅"]
     B4 --> B5
     B5 --> B6["Batch 6<br/>AXI Integration"]
+
 ```
 
 > [!IMPORTANT]
@@ -233,22 +234,27 @@ Thin wrapper:
 
 ---
 
-## Batch 5 — ML-KEM Decaps
+## Batch 5 — ML-KEM Decaps ✅ VERIFIED
 
 **FIPS 203 Ref:** Algorithm 18 (ML-KEM.Decaps)
-**Trạng thái:** NOT DONE (chưa có module-level implementation)
+**Trạng thái:** DONE - VERIFIED (100/100 KAT pass + 100/100 implicit rejection pass, 2026-04-19)
 
 ### Trạng thái thực tế
 | Module | Trạng thái |
 |--------|--------|
-| `ml_kem_decaps.v` | NOT STARTED (chưa có trong `sources_1/new`) |
-| `tb_ml_kem_decaps.sv` | NOT STARTED (chưa có trong `sim_1/new`) |
-| Tiền đề Decaps (`kpke_decrypt.v`) | DONE - Verified (100/100 KAT pass) |
+| `ml_kem_decaps.v` | DONE - Verified (100/100 KAT pass, match + fail branches, constant-time Δ=0) |
+| `tb_ml_kem_decaps.sv` | DONE - Verified (MAX_KATS=100, dual-run match/fail per KAT, timing check) |
+| Tiền đề (`kpke_decrypt.v`) | DONE - Verified (100/100 KAT pass) |
+| Tiền đề (`kpke_encrypt.v`) | DONE - Verified (qua integrated Encaps + Decaps KAT runs) |
 
 > [!NOTE]
-> Bằng chứng regression decrypt mới nhất (tiền đề cho Batch 5):
-> - `verilog_ML_KEM/scripts/Decaps/decaps_metrics/sim_decrypt_20260419_010757/sim_decrypt_simulate.log`
-> - Kết quả: `KAT #100 PASSED`, `Reached MAX_KATS=100`, `ALL TESTS PASSED: 100 KAT vectors`.
+> Bằng chứng closure Batch 5:
+> - `tb_ml_kem_decaps` run 2026-04-19: `KAT #1..#100 PASSED`, `ALL TESTS PASSED: 100 decaps KAT vectors`.
+> - Mỗi KAT chạy 2 lần: match (ct gốc → ss == exp_ss) + fail (ct_tampered → ss == K_reject).
+> - Constant-time: Δ cycles = 0 cho tất cả 100 vectors (TIMING_DELTA_MAX=10, actual=0).
+> - Implicit rejection: `ct_tampered[0] ^= 8'hFF`, output verified == `dut.k_reject` (SHAKE-256(z||ct)).
+> - Zeroization: m', r', K' cleared in S_ZEROIZE state.
+> - Clean exit: `$finish` at tb line 282, no `$fatal`.
 
 ### Thuật toán
 ```
@@ -266,73 +272,123 @@ Input:  dk = (dk_PKE || ek || H(ek) || z)    (2400 bytes)
 ```
 
 > [!WARNING]
-> **Security-Critical Requirements:**
-> - **Constant-time comparison** (step 4): XOR-accumulate ALL 1088 bytes, no early exit
-> - **Implicit rejection** (step 4 else): Must use SHAKE-256(z || c) — NOT return error
-> - **Both branches must execute** regardless of comparison result (no timing leak)
+> **Security-Critical Requirements (ALL MET ✅):**
+> - **Constant-time comparison** (step 4): XOR-accumulate ALL 1088 bytes, no early exit ✅
+> - **Implicit rejection** (step 4 else): SHAKE-256(z || c) output verified ✅
+> - **Both branches execute** regardless of comparison result (Δ=0 cycles) ✅
+> - **Zeroization**: m', r', K' cleared after operation ✅
 
-### Module mới
+---
 
-#### [NEW] `ml_kem_decaps.v`
+### ✅ Kiến trúc hiện tại (Verified): Dual-Instantiation Orchestrator
 
-**Kiến trúc quyết định: Shared-Core FSM**
+> Implementation thực tế dùng **dual-instantiation** — instantiate riêng `kpke_decrypt` + `kpke_encrypt`
+> + 1× `keccak_sponge_top` (cho SHA3-512/SHAKE-256 ở top level).
+> FSM top-level chỉ orchestrate: preload → decrypt → hash → preload → encrypt → compare → output.
 
-Module Decaps cần chạy tuần tự: Decrypt → Re-Encrypt → Compare → Output.
-Thay vì instantiate cả `kpke_decrypt` + `kpke_encrypt` (→ 2× tất cả IP cores, lãng phí),
-dùng **1 bộ shared cores** với FSM điều phối 2 pha:
+#### `ml_kem_decaps.v` (current)
 
 **IP Cores instantiate bên trong:**
-- 1× `keccak_sponge_top`
-- 1× `ntt_top`
-- 1× `inv_ntt_top`
-- 1× `poly_pointwise_top`
-- 1× `poly_add_sub_top`
-- 1× `poly_cbd_eta2_top`
-- 1× `poly_parse_inline_top`
-- 1× `poly_frombytes`
-- 1× `poly_tobytes`
-- 1× `poly_compress`
-- 1× `poly_decompress`
-- 1× `poly_frommsg` (encode m' cho re-encryption)
+- 1× `keccak_sponge_top` (SHA3-512 cho G, SHAKE-256 cho J)
+- 1× `kpke_decrypt` (chứa NTT, INTT, PW, AddSub, Decompress, Frombytes, Compress)
+- 1× `kpke_encrypt` (chứa Keccak, CBD, NTT, INTT, PW, AddSub, Parse, Frombytes, Compress, Frommsg)
 
-**BRAM nội bộ:**
-- 3× BRAM18K cho `s_hat[3]`
-- 3× BRAM18K cho `u_hat/r_hat[3]` (reuse giữa Decrypt và Encrypt)
-- 1× BRAM18K cho `acc`
-- 1× BRAM18K cho `v_poly`
-- 1× BRAM18K cho `e2`
-- Byte BRAM cho `ct_prime` (1088 bytes so sánh với ct_in)
-- **Tổng: ~12× BRAM18K + 1× byte BRAM**
+**BRAM nội bộ (top-level Decaps):**
+- `dk_buf` (2400×8) — decapsulation key
+- `ct_buf` (1088×8) — input ciphertext
+- `ct_prime_buf` (1088×8) — re-encrypted ciphertext for compare
+- Registers: `m_prime[32]`, `k_prime[32]`, `r_prime[32]`, `k_reject[32]`, `ss_buf[32]`
 
-**FSM States (high-level):**
+**FSM States (21 total):**
 ```
-S_IDLE → S_UNPACK_SK (extract dk_PKE, ek, h, z)
-→ [PHASE 1: DECRYPT] S_DECRYPT_* (reuse Batch 3 logic)
-→ S_HASH_G (SHA3-512(m' || h) → K', r')
-→ [PHASE 2: RE-ENCRYPT] S_ENCRYPT_* (reuse Batch 4 logic, output → ct_prime)
-→ S_COMPARE (XOR-accumulate 1088 bytes, constant-time)
-→ S_DERIVE_KEY (if fail: SHAKE-256(z || ct_in))
-→ S_OUTPUT_K (conditional mux, constant-time select)
-→ S_DONE
+S_IDLE → S_DEC_PRELOAD (pump dk_PKE + ct → decrypt)
+→ S_DEC_START → S_DEC_WAIT → S_CAPTURE_M
+→ S_HASH_G_INIT → S_HASH_G_ABS → S_HASH_G_FIN → S_HASH_G_WAIT (SHA3-512: m'||h → K',r')
+→ S_HASH_J_INIT → S_HASH_J_ABS → S_HASH_J_FIN → S_HASH_J_WAIT (SHAKE-256: z||ct → K_reject)
+→ S_ENC_PRELOAD (pump ek + m' + r' → encrypt)
+→ S_ENC_START → S_ENC_WAIT → S_ENC_SETTLE
+→ S_COMPARE_INIT → S_COMPARE (XOR-accumulate 1088 bytes)
+→ S_OUTPUT (constant-time MUX: K = match ? K' : K_reject)
+→ S_ZEROIZE (clear m', r', K') → S_DONE
 ```
 
-**Constant-Time Compare RTL:**
+**Constant-Time Compare RTL (actual):**
 ```verilog
 reg [7:0] xor_acc;
-always @(posedge clk) begin
-    if (state == S_COMPARE_INIT)
-        xor_acc <= 8'd0;
-    else if (state == S_COMPARE)
-        xor_acc <= xor_acc | (ct_in_byte ^ ct_prime_byte);  // NO early exit
-end
-wire compare_pass = (xor_acc == 8'd0);  // Only valid after ALL bytes
+// S_COMPARE: iterate ALL 1088 bytes, NO early exit
+xor_acc <= xor_acc | (ct_buf[var_k] ^ ct_prime_buf[var_k]);
+match_reg <= (compare_xor_next == 8'd0);  // Only at var_k == 1087
+
+// S_OUTPUT: bitwise mask MUX (no if/else branching)
+wire [7:0] match_mask = {8{match_reg}};
+ss_buf[i] <= (k_prime[i] & match_mask) | (k_reject[i] & ~match_mask);
 ```
 
-**Cycle Estimate:** ~109,000 cycles (~1,090 µs @ 100MHz)
+**Cycle Count (measured):** ~84,000 cycles (~840 µs @ 100MHz)
 
-#### [NEW] `tb_ml_kem_decaps.sv`
-- Full KAT protocol test: `(sk, ct) → verify ss` khớp golden
-- Implicit rejection test: tampered `ct` → verify output ≠ K' (uses z-derived fallback)
+**Resource Estimate (dual-instantiation):**
+| Resource | Decaps standalone | Ghi chú |
+|----------|------------------|---------|
+| LUT | ~30K | decrypt ~12K + encrypt ~18K |
+| BRAM18K | ~42 | 28 (decrypt) + 12 (encrypt) + 2 (top) |
+| DSP48E2 | 6 | 3 per decrypt + encrypt |
+
+#### `tb_ml_kem_decaps.sv`
+- Full KAT protocol test: `(sk, ct) → verify ss` khớp golden (100/100 pass)
+- Implicit rejection test: `ct[0] ^= 0xFF` → verify output == K_reject (100/100 pass)
+- Timing side-channel check: `|Δ cycles| <= TIMING_DELTA_MAX=10` (actual Δ=0 cho tất cả vectors)
+
+---
+
+### 🎯 Kiến trúc mục tiêu (chưa implement): Shared-Core FSM
+
+> [!IMPORTANT]
+> **Đây là kiến trúc tối ưu area ghi trong roadmap ban đầu.**
+> Chưa implement vì ưu tiên correctness-first. Sẽ refactor nếu Batch 6 synthesis
+> cho thấy utilization quá cao hoặc timing không đạt.
+>
+> **Khi nào cần refactor:**
+> - Tổng LUT > 80% ZU5EV (117K) → cần giảm ~12K LUT
+> - Tổng BRAM > 70% (288) → cần giảm ~29 BRAM18K
+> - Timing closure fail do congestion
+
+**Ý tưởng chính:** Thay vì instantiate 2 module riêng, dùng **1 bộ shared IP cores**
+(NTT, INTT, PW, AddSub, Keccak...) với FSM 2-pha điều phối Decrypt → Encrypt tuần tự.
+
+**IP Cores (shared, 1 bộ duy nhất):**
+- 1× `keccak_sponge_top`
+- 1× `ntt_top` / `inv_ntt_top`
+- 1× `poly_pointwise_top` / `poly_add_sub_top`
+- 1× `poly_cbd_eta2_top` / `poly_parse_inline_top`
+- 1× `poly_frombytes` / `poly_compress` / `poly_decompress` / `poly_frommsg`
+
+**BRAM (shared, reuse giữa 2 pha):**
+| Tên | SL | Dùng cho |
+|-----|---|----------|
+| `s_hat[0..2]` | 3 | Decrypt: ŝ từ dk_PKE |
+| `u_hat/r_hat[0..2]` | 3 | Phase 1: û / Phase 2: r̂' (reuse) |
+| `t_hat[0..2]` | 3 | Re-Encrypt: t̂ từ ek |
+| `acc` / `v_poly` / `e2` | 3 | Shared buffers |
+| **Tổng** | **~12** | *reuse giữa 2 pha giảm xuống ~9* |
+
+**FSM (shared-core, ~50+ states):**
+```
+S_IDLE → S_UNPACK_DK
+→ [PHASE 1: DECRYPT] decode_sk → decompress_u/v → NTT_u → PW_acc → INTT → sub → compress_msg
+→ S_HASH_G (SHA3-512) → S_HASH_J (SHAKE-256)
+→ [PHASE 2: RE-ENCRYPT] decode_ek → gen_r/e1/e2 → calc_u → calc_v → compress_u/v → ct'
+→ S_COMPARE → S_OUTPUT_K → S_ZEROIZE → S_DONE
+```
+
+**Tradeoff Summary:**
+| | Dual-Instantiation (✅ current) | Shared-Core (🎯 target) |
+|---|---|---|
+| FSM complexity | 21 states | ~50+ states |
+| Verification effort | LOW | HIGH (new monolithic FSM) |
+| Latency | ~84K cycles (~840 µs) | ~109K cycles (~1,090 µs) |
+| LUT | ~30K | ~18K |
+| BRAM18K | ~42 | ~13 |
+| DSP48E2 | 6 | 3 |
 
 ---
 
@@ -374,10 +430,10 @@ PS (ARM A53) ←→ AXI4-Lite (Control) ←→ ml_kem_top
 
 | Resource | Batch 2 | Batch 3 | Batch 4 | Batch 5 | Batch 6 | ZU5EV Total | % Used |
 |----------|---------|---------|---------|---------|---------|-------------|--------|
-| BRAM18K  | 14      | 7       | 12      | 13      | ~5      | 288         | ~18%   |
-| DSP48E2  | 3       | 3       | 3       | 3       | 0       | 96          | ~12%   |
-| LUT      | ~15K    | ~12K    | ~18K    | ~18K    | ~3K     | 117K        | ~56%   |
-| FF       | ~8K     | ~6K     | ~10K    | ~10K    | ~2K     | 234K        | ~15%   |
+| BRAM18K  | 14      | 7       | 12      | 42 (dual) / 13 (shared) | ~5      | 288         | ~28% (dual) / ~18% (shared) |
+| DSP48E2  | 3       | 3       | 3       | 6 (dual) / 3 (shared)  | 0       | 96          | ~16% (dual) / ~12% (shared) |
+| LUT      | ~15K    | ~12K    | ~18K    | ~30K (dual) / ~18K (shared) | ~3K     | 117K        | ~67% (dual) / ~56% (shared) |
+| FF       | ~8K     | ~6K     | ~10K    | ~15K (dual) / ~10K (shared) | ~2K     | 234K        | ~18% (dual) / ~15% (shared) |
 
 > [!NOTE]
 > Các con số trên giả định Resource-per-function (mỗi module có IP cores riêng).

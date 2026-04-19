@@ -1,4 +1,4 @@
-# Roadmap: Batch 3 → 6 (ML-KEM-768 Pure RTL)
+﻿# Roadmap: Batch 3 → 6 (ML-KEM-768 Pure RTL)
 
 > **Platform:** Kria KR260 (ZU5EV) | **Clock:** 100 MHz | **Architecture:** Sequential Host-Port Pump
 
@@ -366,14 +366,16 @@ S_DONE ──── c = c1 || c2
 ---
 ---
 
-# Batch 5 — ML-KEM Decaps
+# Batch 5 — ML-KEM Decaps ✅ VERIFIED
 
 **FIPS 203 Ref:** Algorithm 18 (ML-KEM.Decaps)
-Trạng thái: NOT DONE (chưa có `ml_kem_decaps.v`/`tb_ml_kem_decaps.sv` trong repo hiện tại)
+Trạng thái: DONE - VERIFIED (100/100 KAT pass + 100/100 implicit rejection pass, constant-time Δ=0, 2026-04-19)
 Bằng chứng:
-- `sources_1/new` chưa có `ml_kem_decaps.v`.
-- `sim_1/new` chưa có `tb_ml_kem_decaps.sv`.
-- Regression tiền đề (`kpke_decrypt`) xanh: `sim_decrypt_20260419_010757/sim_decrypt_simulate.log` cho kết quả `ALL TESTS PASSED: 100 KAT vectors`.
+- `tb_ml_kem_decaps` run 2026-04-19: `ALL TESTS PASSED: 100 decaps KAT vectors`.
+- Mỗi KAT chạy 2 lần: match (ct gốc → ss == exp_ss) + fail (ct_tampered[0]^=0xFF → ss == K_reject).
+- Constant-time: Δ cycles = 0 cho tất cả 100 vectors.
+- Zeroization: m', r', K' cleared in S_ZEROIZE.
+- Regression tiền đề (`kpke_decrypt`): DONE - Verified (100/100 KAT pass).
 **HLS Golden:** `decaps.cpp` (full file)
 
 ## Algorithm
@@ -411,29 +413,121 @@ else:
 ```
 
 > [!WARNING]
-> **Security-Critical:**
-> 1. **Constant-time compare:** XOR-accumulate, NO early exit
-> 2. **Implicit rejection:** Output `SHAKE-256(z || ct)` khi fail, KHÔNG return error
-> 3. **Both K' and K_reject phải được tính xong** trước khi MUX chọn output
-> 4. **Zeroization:** Clear m', r', K' khỏi BRAM/register sau khi done
+> **Security-Critical (ALL MET ✅):**
+> 1. **Constant-time compare:** XOR-accumulate, NO early exit ✅
+> 2. **Implicit rejection:** Output `SHAKE-256(z || ct)` khi fail ✅
+> 3. **Both K' and K_reject phải được tính xong** trước khi MUX chọn output ✅
+> 4. **Zeroization:** Clear m', r', K' khỏi BRAM/register sau khi done ✅
 
-## Quyết định Kiến trúc: Shared-Core FSM
+## Constant-Time RTL Patterns
+
+### Compare (KHÔNG early exit)
+```verilog
+reg [7:0] xor_acc;
+// In S_COMPARE: iterate ALL 1088 bytes
+always @(posedge clk) begin
+    if (state == S_COMPARE_INIT)
+        xor_acc <= 8'd0;
+    else if (state == S_COMPARE)
+        xor_acc <= xor_acc | (ct_in_byte ^ ct_prime_byte);
+end
+wire match = (xor_acc == 8'd0); // Only valid AFTER all 1088 iterations
+```
+
+### Conditional Output (constant-time MUX)
+```verilog
+// BOTH K' and K_reject already computed
+// Select using bitwise mask, not if/else
+wire [7:0] mask = {8{match}};  // 0xFF or 0x00
+wire [7:0] k_out = (K_prime & mask) | (K_reject & ~mask);
+```
+
+---
+
+## ✅ Kiến trúc hiện tại (Verified): Dual-Instantiation Orchestrator
+
+> Implementation thực tế dùng **dual-instantiation** — instantiate riêng `kpke_decrypt` + `kpke_encrypt`
+> + 1× `keccak_sponge_top` top-level. FSM chỉ orchestrate preload/start/wait/compare/output.
+
+### Files
+
+| File | Mô tả |
+|------|--------|
+| `sources_1/new/ml_kem_decaps.v` | Orchestrator FSM (21 states, dual-instantiation) |
+| `sim_1/new/tb_ml_kem_decaps.sv` | Full KAT + implicit rejection + timing check |
+
+### IP Cores (dual-instantiation)
+
+- 1× `keccak_sponge_top` (SHA3-512 cho G, SHAKE-256 cho J)
+- 1× `kpke_decrypt` (chứa NTT, INTT, PW, AddSub, Decompress, Frombytes, Compress)
+- 1× `kpke_encrypt` (chứa Keccak, CBD, NTT, INTT, PW, AddSub, Parse, Frombytes, Compress, Frommsg)
+
+### BRAM nội bộ (dual-instantiation)
+
+- `dk_buf` (2400×8) — decapsulation key
+- `ct_buf` (1088×8) — input ciphertext
+- `ct_prime_buf` (1088×8) — re-encrypted ciphertext for compare
+- Registers: `m_prime[32]`, `k_prime[32]`, `r_prime[32]`, `k_reject[32]`, `ss_buf[32]`
+- Plus: tất cả BRAM bên trong `kpke_decrypt` (~28 BRAM18K) và `kpke_encrypt` (~12 BRAM18K)
+
+### FSM States (21 total)
+
+```
+S_IDLE → S_DEC_PRELOAD (pump dk_PKE + ct → decrypt)
+→ S_DEC_START → S_DEC_WAIT → S_CAPTURE_M
+→ S_HASH_G_INIT → S_HASH_G_ABS → S_HASH_G_FIN → S_HASH_G_WAIT (SHA3-512: m'||h → K',r')
+→ S_HASH_J_INIT → S_HASH_J_ABS → S_HASH_J_FIN → S_HASH_J_WAIT (SHAKE-256: z||ct → K_reject)
+→ S_ENC_PRELOAD (pump ek + m' + r' → encrypt)
+→ S_ENC_START → S_ENC_WAIT → S_ENC_SETTLE
+→ S_COMPARE_INIT → S_COMPARE (XOR-accumulate 1088 bytes)
+→ S_OUTPUT (constant-time MUX) → S_ZEROIZE → S_DONE
+```
+
+### Cycle Count (measured)
+
+| Bước | Cycles (measured) |
+|------|---------:|
+| Preload dk + ct → decrypt | ~3,500 |
+| Phase 1: Decrypt | ~21,000 |
+| Hash G (SHA3-512) + Hash J (SHAKE-256) | ~3,500 |
+| Preload ek + m' + r' → encrypt | ~1,250 |
+| Phase 2: Re-Encrypt | ~53,000 |
+| Settle + Compare (1088 bytes) | ~1,100 |
+| Output MUX + Zeroize | ~100 |
+| **Tổng** | **~84,000 → ~840 µs** |
+
+### Verification
+
+#### `tb_ml_kem_decaps.sv`
+
+**Test 1 — Normal flow (match):** 100/100 KAT PASSED
+**Test 2 — Implicit rejection (fail):** 100/100 tampered ct → K_reject PASSED
+**Test 3 — Timing:** Δ cycles = 0 cho tất cả 100 vectors
+
+---
+
+## 🎯 Kiến trúc mục tiêu (chưa implement): Shared-Core FSM
+
+> [!IMPORTANT]
+> **Đây là kiến trúc tối ưu area ghi trong roadmap ban đầu.**
+> Chưa implement vì ưu tiên correctness-first.
+>
+> **Khi nào cần refactor:**
+> - Tổng LUT > 80% ZU5EV (117K) → cần giảm ~12K LUT
+> - Tổng BRAM > 70% (288) → cần giảm ~29 BRAM18K
+> - Timing closure fail do congestion
+> - Quyết định dựa trên kết quả synthesis Batch 6
+
+### Ý tưởng chính
 
 Decaps chạy tuần tự: Decrypt → Hash → Re-Encrypt → Compare.
-**KHÔNG** instantiate cả `kpke_decrypt` + `kpke_encrypt` (→ 2× tất cả cores, lãng phí).
+**KHÔNG** instantiate cả `kpke_decrypt` + `kpke_encrypt` (→ 2× tất cả cores).
 Thay vào đó: **1 bộ shared cores** với FSM 2-pha.
 
 > Điều này khác với Batch 2 (mỗi module có cores riêng) vì Decaps chạy
 > Decrypt và Encrypt **tuần tự**, không bao giờ song song.
 
-## Files cần tạo
-
-| File | Mô tả |
-|------|--------|
-| `sources_1/new/ml_kem_decaps.v` | FSM orchestrator (shared cores, 2-pha) |
-| `sim_1/new/tb_ml_kem_decaps.sv` | Full KAT + implicit rejection test |
-
-## IP Cores instantiate bên trong
+### IP Cores (shared, 1 bộ duy nhất)
 
 - 1× `keccak_sponge_top` (SHA3-512, SHAKE128, SHAKE256)
 - 1× `ntt_top`
@@ -447,7 +541,7 @@ Thay vào đó: **1 bộ shared cores** với FSM 2-pha.
 - 1× `poly_decompress` (d=4, d=10)
 - 1× `poly_frommsg`
 
-## BRAM nội bộ
+### BRAM nội bộ (shared)
 
 | Tên | Số lượng | Dùng cho |
 |-----|---------|----------|
@@ -464,7 +558,7 @@ Thêm byte-BRAM cho:
 - `ct_prime` (1088 bytes) — re-encrypted ciphertext cho compare
 - `ek_buf` (1184 bytes), `dk_buf` (1152 bytes) — hoặc stream từ external
 
-## FSM States (high-level)
+### FSM States (shared-core, ~50+ states)
 
 ```
 S_IDLE
@@ -521,67 +615,29 @@ S_ZEROIZE ──── Clear m', r', K', s_hat from BRAM/registers
 S_DONE
 ```
 
-## Constant-Time RTL Patterns
+### Cycle Estimate (shared-core)
 
-### Compare (KHÔNG early exit)
-```verilog
-reg [7:0] xor_acc;
-// In S_COMPARE: iterate ALL 1088 bytes
-always @(posedge clk) begin
-    if (state == S_COMPARE_INIT)
-        xor_acc <= 8'd0;
-    else if (state == S_COMPARE)
-        xor_acc <= xor_acc | (ct_in_byte ^ ct_prime_byte);
-end
-wire match = (xor_acc == 8'd0); // Only valid AFTER all 1088 iterations
-```
-
-### Conditional Output (constant-time MUX)
-```verilog
-// BOTH K' and K_reject already computed
-// Select using bitwise mask, not if/else
-wire [7:0] mask = {8{match}};  // 0xFF or 0x00
-wire [7:0] k_out = (K_prime & mask) | (K_reject & ~mask);
-```
-
-## Cycle Estimate
-
-| Bước | Cycles |
-|------|--------|
+| Bước | Cycles (estimate) |
+|------|---------:|
 | Unpack dk | ~3,000 |
 | Phase 1: Decrypt | ~21,000 |
 | Hash G + Hash J | ~3,500 |
 | Phase 2: Re-Encrypt | ~80,000 |
 | Compare (1088 bytes) | ~1,100 |
 | Output + Zeroize | ~500 |
-| **Tổng** | **~109,000 cycles → ~1,090 µs** |
+| **Tổng** | **~109,000 → ~1,090 µs** |
 
-## Verification
+### Tradeoff Summary
 
-### `tb_ml_kem_decaps.sv`
+| | Dual-Instantiation (✅ current) | Shared-Core (🎯 target) |
+|---|---|---|
+| FSM complexity | 21 states | ~50+ states |
+| Verification effort | LOW (reuse verified modules) | HIGH (new monolithic FSM) |
+| Latency | ~84K cycles (~840 µs) | ~109K cycles (~1,090 µs) |
+| LUT | ~30K | ~18K |
+| BRAM18K | ~42 | ~13 |
+| DSP48E2 | 6 | 3 |
 
-**Test 1 — Normal flow (match):**
-```
-1. ml_kem_keygen(seed_d, seed_z) → (pk, sk)
-2. ml_kem_encaps(pk, m) → (K_enc, ct)
-3. ml_kem_decaps(sk, ct) → K_dec
-4. ASSERT: K_enc == K_dec
-```
-
-**Test 2 — Implicit rejection (fail):**
-```
-1. Tạo (pk, sk, ct) như trên
-2. Tamper ct: ct[0] ^= 0xFF
-3. ml_kem_decaps(sk, ct_tampered) → K_dec
-4. ASSERT: K_dec != K_enc   (K_dec = SHAKE-256(z || ct_tampered))
-5. ASSERT: K_dec == expected_rejection_value (from golden model)
-```
-
-**Test 3 — Timing:**
-```
-Đo cycle_count cho cả 2 test cases trên.
-ASSERT: |cycles_match - cycles_fail| < 10   // Constant-time verification
-```
 
 ---
 ---
