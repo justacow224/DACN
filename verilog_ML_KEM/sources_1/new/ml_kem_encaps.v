@@ -117,6 +117,27 @@ module ml_kem_encaps (
         .ct_dout(enc_ct_dout)
     );
 
+    // Keep byte-memory writes separate from FSM control for clearer BRAM inference.
+    always @(posedge clk) begin
+        if (in_we && !busy) begin
+            if (!in_sel) begin
+                if (in_addr < 11'd1184) begin
+                    ek_buf[in_addr] <= in_wdata;
+                end
+            end else begin
+                if (in_addr < 11'd32) begin
+                    m_buf[in_addr[4:0]] <= in_wdata;
+                end
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (enc_ct_we && (enc_ct_addr < 11'd1088)) begin
+            ct_buf[enc_ct_addr] <= enc_ct_dout;
+        end
+    end
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state            <= S_IDLE;
@@ -146,21 +167,8 @@ module ml_kem_encaps (
             init_keccak      <= 1'b0;
             finalize_keccak  <= 1'b0;
             k_din_valid      <= 1'b0;
-            fsm_k_dout_ready <= 1'b0;
             enc_start        <= 1'b0;
             enc_in_we        <= 1'b0;
-
-            if (in_we && !busy) begin
-                if (!in_sel) begin
-                    if (in_addr < 11'd1184) ek_buf[in_addr] <= in_wdata;
-                end else begin
-                    if (in_addr < 11'd32) m_buf[in_addr[4:0]] <= in_wdata;
-                end
-            end
-
-            if (enc_ct_we && (enc_ct_addr < 11'd1088)) begin
-                ct_buf[enc_ct_addr] <= enc_ct_dout;
-            end
 
             if (out_rd) begin
                 out_valid <= 1'b1;
@@ -188,30 +196,33 @@ module ml_kem_encaps (
                     init_keccak <= 1'b1;
                     hash_type   <= 2'b10; // SHA3-256
                     var_k       <= 12'd0;
+                    k_din       <= ek_buf[11'd0];
+                    k_din_valid <= 1'b1;
                     state       <= S_HASH_H_ABS;
                 end
 
                 S_HASH_H_ABS: begin
+                    k_din_valid <= 1'b1;
                     if (k_din_ready) begin
-                        if (var_k < 12'd1184) begin
-                            k_din       <= ek_buf[var_k[10:0]];
-                            k_din_valid <= 1'b1;
-                            var_k       <= var_k + 12'd1;
-                        end else begin
+                        if (var_k == 12'd1183) begin
+                            k_din_valid <= 1'b0;
                             state <= S_HASH_H_FIN;
+                        end else begin
+                            var_k       <= var_k + 12'd1;
+                            k_din       <= ek_buf[var_k + 12'd1];
                         end
                     end
                 end
 
                 S_HASH_H_FIN: begin
                     finalize_keccak <= 1'b1;
+                    fsm_k_dout_ready <= 1'b1;
                     var_k <= 12'd0;
                     state <= S_HASH_H_WAIT;
                 end
 
                 S_HASH_H_WAIT: begin
-                    fsm_k_dout_ready <= 1'b1;
-                    if (k_dout_valid) begin
+                    if (k_dout_valid && fsm_k_dout_ready) begin
                         h_buf[var_k[4:0]] <= k_dout;
                         var_k <= var_k + 12'd1;
                         if (var_k == 12'd31) begin
@@ -227,34 +238,36 @@ module ml_kem_encaps (
                     init_keccak <= 1'b1;
                     hash_type   <= 2'b11; // SHA3-512
                     var_k       <= 12'd0;
+                    k_din       <= m_buf[5'd0];
+                    k_din_valid <= 1'b1;
                     state       <= S_HASH_G_ABS;
                 end
 
                 S_HASH_G_ABS: begin
+                    k_din_valid <= 1'b1;
                     if (k_din_ready) begin
-                        if (var_k < 12'd32) begin
-                            k_din       <= m_buf[var_k[4:0]];
-                            k_din_valid <= 1'b1;
-                            var_k       <= var_k + 12'd1;
-                        end else if (var_k < 12'd64) begin
-                            k_din       <= h_buf[var_k - 12'd32];
-                            k_din_valid <= 1'b1;
-                            var_k       <= var_k + 12'd1;
-                        end else begin
+                        if (var_k == 12'd63) begin
+                            k_din_valid <= 1'b0;
                             state <= S_HASH_G_FIN;
+                        end else begin
+                            var_k       <= var_k + 12'd1;
+                            if (var_k < 12'd31) begin
+                                k_din <= m_buf[var_k[4:0] + 5'd1];
+                            end else begin
+                                k_din <= h_buf[var_k - 12'd31];
+                            end
                         end
                     end
                 end
-
                 S_HASH_G_FIN: begin
                     finalize_keccak <= 1'b1;
+                    fsm_k_dout_ready <= 1'b1;
                     var_k <= 12'd0;
                     state <= S_HASH_G_WAIT;
                 end
 
                 S_HASH_G_WAIT: begin
-                    fsm_k_dout_ready <= 1'b1;
-                    if (k_dout_valid) begin
+                    if (k_dout_valid && fsm_k_dout_ready) begin
                         if (var_k < 12'd32) begin
                             ss_buf[var_k[4:0]] <= k_dout;
                             ss_out[var_k[4:0]*8 +: 8] <= k_dout;

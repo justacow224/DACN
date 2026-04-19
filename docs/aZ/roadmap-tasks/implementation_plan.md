@@ -1,4 +1,4 @@
-# ML-KEM-768 RTL Implementation — Full Roadmap (Batch 1→6)
+﻿# ML-KEM-768 RTL Implementation — Full Roadmap (Batch 1→6)
 
 ## Dependency Graph (Topological Order)
 
@@ -124,10 +124,25 @@ S_IDLE → S_DECODE_SK (frombytes × 3) → S_DECOMPRESS_U (decompress_10 × 3)
 ## Batch 4 — K-PKE Encrypt + ML-KEM Encaps
 
 **FIPS 203 Ref:** Algorithm 14 (K-PKE.Encrypt) + Algorithm 17 (ML-KEM.Encaps)
+**Trạng thái:** DONE - VERIFIED (Encaps full KAT pass, 2026-04-19)
+
+### Trạng thái thực tế
+| Module | Trạng thái |
+|--------|--------|
+| `kpke_encrypt.v` | DONE - Verified qua integrated Encaps KAT run (100/100 pass) |
+| `ml_kem_encaps.v` | DONE - Verified (100/100 encaps KAT pass) |
+| `tb_kpke_encrypt.sv` | READY - chưa có standalone rerun trong môi trường CLI hiện tại |
+| `tb_ml_kem_encaps.sv` | DONE - Verified (MAX_KATS=100, all pass) |
+
+> [!NOTE]
+> Bằng chứng closure Batch 4:
+> - Terminal run 2026-04-19 (`tb_ml_kem_encaps`): `KAT #1..#100 PASSED`, `ALL TESTS PASSED: 100 encaps KAT vectors`.
+> - Debug line tại KAT1: `DBG KAT1 hash h[0..3]=f5 72 62 66 ss[0..3]=ac 86 5f 83`.
+> - Trong CLI container hiện tại không có `vivado/xsim`, nên standalone `tb_kpke_encrypt` được track qua integrated Encaps KAT.
 
 ### Thuật toán K-PKE.Encrypt
 ```
-Input:  ek_PKE = (t_hat_bytes || ρ)    (1184 bytes)
+Input:  ek_PKE = (t_hat_bytes || ρ)    (1184 bytes) (t_hat_bytes (1152 bytes) + ρ (32 bytes) )
         m      (32 bytes)
         r      (32 bytes — randomness)
 
@@ -221,6 +236,19 @@ Thin wrapper:
 ## Batch 5 — ML-KEM Decaps
 
 **FIPS 203 Ref:** Algorithm 18 (ML-KEM.Decaps)
+**Trạng thái:** NOT DONE (chưa có module-level implementation)
+
+### Trạng thái thực tế
+| Module | Trạng thái |
+|--------|--------|
+| `ml_kem_decaps.v` | NOT STARTED (chưa có trong `sources_1/new`) |
+| `tb_ml_kem_decaps.sv` | NOT STARTED (chưa có trong `sim_1/new`) |
+| Tiền đề Decaps (`kpke_decrypt.v`) | DONE - Verified (100/100 KAT pass) |
+
+> [!NOTE]
+> Bằng chứng regression decrypt mới nhất (tiền đề cho Batch 5):
+> - `verilog_ML_KEM/scripts/Decaps/decaps_metrics/sim_decrypt_20260419_010757/sim_decrypt_simulate.log`
+> - Kết quả: `KAT #100 PASSED`, `Reached MAX_KATS=100`, `ALL TESTS PASSED: 100 KAT vectors`.
 
 ### Thuật toán
 ```
@@ -354,4 +382,3 @@ PS (ARM A53) ←→ AXI4-Lite (Control) ←→ ml_kem_top
 > [!NOTE]
 > Các con số trên giả định Resource-per-function (mỗi module có IP cores riêng).
 > Nếu cần giảm area, có thể share cores ở Batch 6 top level (nhưng tăng complexity FSM).
-

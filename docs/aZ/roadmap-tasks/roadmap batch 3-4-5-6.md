@@ -171,6 +171,11 @@ S_DONE
 # Batch 4 — K-PKE Encrypt + ML-KEM Encaps
 
 **FIPS 203 Ref:** Algorithm 14 (K-PKE.Encrypt) + Algorithm 17 (ML-KEM.Encaps)
+Trạng thái: DONE - VERIFIED (Encaps KAT 100/100 pass, ngày 2026-04-19)
+Bằng chứng:
+- `tb_ml_kem_encaps`: `KAT #1..#100 PASSED`, `ALL TESTS PASSED: 100 encaps KAT vectors`.
+- Debug tại KAT1: `DBG KAT1 hash h[0..3]=f5 72 62 66 ss[0..3]=ac 86 5f 83`.
+- Ghi chú regression: trong CLI container hiện tại không có `vivado/xsim`, nên standalone `tb_kpke_encrypt` được track qua integrated Encaps KAT đầy đủ.
 **HLS Golden:** `encaps.cpp` (full file)
 
 ## Algorithm K-PKE.Encrypt
@@ -364,6 +369,11 @@ S_DONE ──── c = c1 || c2
 # Batch 5 — ML-KEM Decaps
 
 **FIPS 203 Ref:** Algorithm 18 (ML-KEM.Decaps)
+Trạng thái: NOT DONE (chưa có `ml_kem_decaps.v`/`tb_ml_kem_decaps.sv` trong repo hiện tại)
+Bằng chứng:
+- `sources_1/new` chưa có `ml_kem_decaps.v`.
+- `sim_1/new` chưa có `tb_ml_kem_decaps.sv`.
+- Regression tiền đề (`kpke_decrypt`) xanh: `sim_decrypt_20260419_010757/sim_decrypt_simulate.log` cho kết quả `ALL TESTS PASSED: 100 KAT vectors`.
 **HLS Golden:** `decaps.cpp` (full file)
 
 ## Algorithm

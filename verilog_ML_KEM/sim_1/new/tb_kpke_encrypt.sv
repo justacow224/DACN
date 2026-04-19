@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 module tb_kpke_encrypt;
-    localparam int DEFAULT_MAX_KATS      = 5;
+    localparam int DEFAULT_MAX_KATS      = 10;
     localparam int KEYGEN_TIMEOUT_CYCLES = 1000000;
     localparam int ENC_TIMEOUT_CYCLES    = 2000000;
     localparam int DEC_TIMEOUT_CYCLES    = 1000000;
@@ -166,7 +166,7 @@ module tb_kpke_encrypt;
         end
     endtask
 
-    task automatic run_keygen_once;
+    task automatic run_keygen_once(output integer cycles);
         integer wd;
         begin
             @(posedge clk);
@@ -178,6 +178,7 @@ module tb_kpke_encrypt;
                 @(posedge clk);
                 wd = wd + 1;
             end
+            cycles = wd;
             if (!kg_done) begin
                 $display("ERROR: TIMEOUT in KeyGen after %0d cycles", wd);
                 $fatal(1);
@@ -213,7 +214,7 @@ module tb_kpke_encrypt;
         end
     endtask
 
-    task automatic run_encrypt_once;
+    task automatic run_encrypt_once(output integer cycles);
         integer wd;
         begin
             @(posedge clk);
@@ -225,6 +226,7 @@ module tb_kpke_encrypt;
                 @(posedge clk);
                 wd = wd + 1;
             end
+            cycles = wd;
             if (!enc_done) begin
                 $display("ERROR: TIMEOUT in K-PKE Encrypt after %0d cycles", wd);
                 $fatal(1);
@@ -253,7 +255,7 @@ module tb_kpke_encrypt;
         end
     endtask
 
-    task automatic run_decrypt_once;
+    task automatic run_decrypt_once(output integer cycles);
         integer wd;
         begin
             @(posedge clk);
@@ -265,6 +267,7 @@ module tb_kpke_encrypt;
                 @(posedge clk);
                 wd = wd + 1;
             end
+            cycles = wd;
             if (!dec_done) begin
                 $display("ERROR: TIMEOUT in K-PKE Decrypt after %0d cycles", wd);
                 $fatal(1);
@@ -305,6 +308,9 @@ module tb_kpke_encrypt;
     integer err_count;
     integer max_kats;
     integer parsed_val;
+    integer cyc_kg;
+    integer cyc_enc;
+    integer cyc_dec;
     string  line;
     bit have_d;
     bit have_z;
@@ -369,16 +375,17 @@ module tb_kpke_encrypt;
                 kat_count = kat_count + 1;
 
                 reset_dut();
-                run_keygen_once();
+                run_keygen_once(cyc_kg);
                 build_test_message(kat_count);
                 preload_encrypt_inputs();
-                run_encrypt_once();
+                run_encrypt_once(cyc_enc);
                 preload_decrypt_inputs();
-                run_decrypt_once();
+                run_decrypt_once(cyc_dec);
                 check_roundtrip(kat_count, err_count);
 
                 if (err_count == 0) begin
-                    $display("KAT #%0d roundtrip PASSED", kat_count);
+                    $display("KAT #%0d roundtrip PASSED (cycles: keygen=%0d, enc=%0d, dec=%0d, total=%0d)",
+                             kat_count, cyc_kg, cyc_enc, cyc_dec, (cyc_kg + cyc_enc + cyc_dec));
                 end else begin
                     $display("KAT #%0d roundtrip has cumulative errors=%0d", kat_count, err_count);
                 end

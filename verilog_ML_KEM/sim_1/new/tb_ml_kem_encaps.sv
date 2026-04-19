@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 module tb_ml_kem_encaps;
-    localparam int DEFAULT_MAX_KATS = 5;
+    localparam int DEFAULT_MAX_KATS = 10;
     localparam int TIMEOUT_CYCLES   = 3000000;
 
     reg         clk;
@@ -90,21 +90,21 @@ module tb_ml_kem_encaps;
     task automatic preload_inputs;
         begin
             for (i = 0; i < 1184; i = i + 1) begin
+                in_we    = 1'b1;
+                in_sel   = 1'b0;
+                in_addr  = i[10:0];
+                in_wdata = pk_bytes[i];
                 @(posedge clk);
-                in_we    <= 1'b1;
-                in_sel   <= 1'b0;
-                in_addr  <= i[10:0];
-                in_wdata <= pk_bytes[i];
             end
             for (i = 0; i < 32; i = i + 1) begin
+                in_we    = 1'b1;
+                in_sel   = 1'b1;
+                in_addr  = i[10:0];
+                in_wdata = m_bytes[i];
                 @(posedge clk);
-                in_we    <= 1'b1;
-                in_sel   <= 1'b1;
-                in_addr  <= i[10:0];
-                in_wdata <= m_bytes[i];
             end
+            in_we = 1'b0;
             @(posedge clk);
-            in_we <= 1'b0;
 
             for (i = 0; i < 1088; i = i + 1) begin
                 ct_mem[i] = 8'h00;
@@ -115,27 +115,45 @@ module tb_ml_kem_encaps;
     task automatic run_one_kat(input int kat_idx, inout integer err_count);
         integer wd;
         integer b;
+        integer cycles;
         reg [7:0] got_ss;
         begin
             reset_dut();
             preload_inputs();
+            if (kat_idx == 1) begin
+                $display("DBG KAT1 preload pk[0..3]=%02x %02x %02x %02x m[0..3]=%02x %02x %02x %02x",
+                         pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
+                         m_bytes[0],  m_bytes[1],  m_bytes[2],  m_bytes[3]);
+                $display("DBG KAT1 dutbuf  ek[0..3]=%02x %02x %02x %02x m[0..3]=%02x %02x %02x %02x",
+                         dut.ek_buf[0], dut.ek_buf[1], dut.ek_buf[2], dut.ek_buf[3],
+                         dut.m_buf[0],  dut.m_buf[1],  dut.m_buf[2],  dut.m_buf[3]);
+            end
 
+            start = 1'b1;
             @(posedge clk);
-            start <= 1'b1;
-            @(posedge clk);
-            start <= 1'b0;
+            start = 1'b0;
 
             wd = 0;
             while (!done && wd < TIMEOUT_CYCLES) begin
                 @(posedge clk);
                 wd = wd + 1;
             end
+            cycles = wd;
 
             if (!done) begin
                 $display("ERROR: TIMEOUT at KAT #%0d", kat_idx);
                 err_count = err_count + 1;
             end
 
+            // Allow final stream writes to settle before compare.
+            repeat (2) @(posedge clk);
+            if (kat_idx == 1) begin
+                $display("DBG KAT1 hash    h[0..3]=%02x %02x %02x %02x ss[0..3]=%02x %02x %02x %02x",
+                         dut.h_buf[0], dut.h_buf[1], dut.h_buf[2], dut.h_buf[3],
+                         dut.ss_buf[0], dut.ss_buf[1], dut.ss_buf[2], dut.ss_buf[3]);
+            end
+
+            // Compare ss from packed output.
             for (b = 0; b < 32; b = b + 1) begin
                 got_ss = ss_out[b*8 +: 8];
                 if (got_ss !== exp_ss[b]) begin
@@ -145,6 +163,7 @@ module tb_ml_kem_encaps;
                 end
             end
 
+            // Compare ct captured from streaming interface.
             for (b = 0; b < 1088; b = b + 1) begin
                 if (ct_mem[b] !== exp_ct[b]) begin
                     $display("ERROR: KAT #%0d ct mismatch at [%0d]: exp=%02x got=%02x",
@@ -154,7 +173,7 @@ module tb_ml_kem_encaps;
             end
 
             if (err_count == 0) begin
-                $display("KAT #%0d PASSED", kat_idx);
+                $display("KAT #%0d PASSED (cycles=%0d)", kat_idx, cycles);
             end else begin
                 $display("KAT #%0d cumulative errors=%0d", kat_idx, err_count);
             end
@@ -163,11 +182,14 @@ module tb_ml_kem_encaps;
 
     integer fd;
     integer status;
+    integer scan_status;
     integer kat_count;
     integer err_count;
     integer max_kats;
     integer parsed_val;
-    string line;
+    string token;
+    string eq;
+    string hex_str;
     bit have_pk;
     bit have_m;
     bit have_ct;
@@ -206,36 +228,66 @@ module tb_ml_kem_encaps;
         $display("===== ML-KEM Encaps KAT Testbench =====");
 
         while (!$feof(fd)) begin
-            status = $fgets(line, fd);
+            scan_status = $fscanf(fd, "%s", token);
+            if (scan_status != 1) begin
+                status = $fgetc(fd);
+                continue;
+            end
 
-            if (line.substr(0, 4) == "pk = ") begin
-                for (i = 0; i < 1184; i = i + 1) begin
-                    parsed_val = (hex_char_to_val(line[5 + i*2]) << 4) |
-                                 hex_char_to_val(line[5 + i*2 + 1]);
-                    pk_bytes[i] = parsed_val[7:0];
+            if (token == "count") begin
+                status = $fscanf(fd, "%s %d", eq, parsed_val);
+                have_pk = 1'b0;
+                have_m  = 1'b0;
+                have_ct = 1'b0;
+                have_ss = 1'b0;
+            end else if (token == "pk") begin
+                status = $fscanf(fd, "%s %s", eq, hex_str);
+                if (status == 2 && hex_str.len() >= 1184*2) begin
+                    for (i = 0; i < 1184; i = i + 1) begin
+                        parsed_val = (hex_char_to_val(hex_str[i*2]) << 4) |
+                                     hex_char_to_val(hex_str[i*2 + 1]);
+                        pk_bytes[i] = parsed_val[7:0];
+                    end
+                    have_pk = 1'b1;
+                end else begin
+                    $display("ERROR: malformed pk token (len=%0d)", hex_str.len());
                 end
-                have_pk = 1'b1;
-            end else if (line.substr(0, 3) == "m = ") begin
-                for (i = 0; i < 32; i = i + 1) begin
-                    parsed_val = (hex_char_to_val(line[4 + i*2]) << 4) |
-                                 hex_char_to_val(line[4 + i*2 + 1]);
-                    m_bytes[i] = parsed_val[7:0];
+            end else if (token == "m" || token == "msg") begin
+                status = $fscanf(fd, "%s %s", eq, hex_str);
+                if (status == 2 && hex_str.len() >= 32*2) begin
+                    for (i = 0; i < 32; i = i + 1) begin
+                        parsed_val = (hex_char_to_val(hex_str[i*2]) << 4) |
+                                     hex_char_to_val(hex_str[i*2 + 1]);
+                        m_bytes[i] = parsed_val[7:0];
+                    end
+                    have_m = 1'b1;
+                end else begin
+                    $display("ERROR: malformed m/msg token (len=%0d)", hex_str.len());
                 end
-                have_m = 1'b1;
-            end else if (line.substr(0, 4) == "ct = ") begin
-                for (i = 0; i < 1088; i = i + 1) begin
-                    parsed_val = (hex_char_to_val(line[5 + i*2]) << 4) |
-                                 hex_char_to_val(line[5 + i*2 + 1]);
-                    exp_ct[i] = parsed_val[7:0];
+            end else if (token == "ct") begin
+                status = $fscanf(fd, "%s %s", eq, hex_str);
+                if (status == 2 && hex_str.len() >= 1088*2) begin
+                    for (i = 0; i < 1088; i = i + 1) begin
+                        parsed_val = (hex_char_to_val(hex_str[i*2]) << 4) |
+                                     hex_char_to_val(hex_str[i*2 + 1]);
+                        exp_ct[i] = parsed_val[7:0];
+                    end
+                    have_ct = 1'b1;
+                end else begin
+                    $display("ERROR: malformed ct token (len=%0d)", hex_str.len());
                 end
-                have_ct = 1'b1;
-            end else if (line.substr(0, 4) == "ss = ") begin
-                for (i = 0; i < 32; i = i + 1) begin
-                    parsed_val = (hex_char_to_val(line[5 + i*2]) << 4) |
-                                 hex_char_to_val(line[5 + i*2 + 1]);
-                    exp_ss[i] = parsed_val[7:0];
+            end else if (token == "ss") begin
+                status = $fscanf(fd, "%s %s", eq, hex_str);
+                if (status == 2 && hex_str.len() >= 32*2) begin
+                    for (i = 0; i < 32; i = i + 1) begin
+                        parsed_val = (hex_char_to_val(hex_str[i*2]) << 4) |
+                                     hex_char_to_val(hex_str[i*2 + 1]);
+                        exp_ss[i] = parsed_val[7:0];
+                    end
+                    have_ss = 1'b1;
+                end else begin
+                    $display("ERROR: malformed ss token (len=%0d)", hex_str.len());
                 end
-                have_ss = 1'b1;
             end
 
             if (have_pk && have_m && have_ct && have_ss) begin
