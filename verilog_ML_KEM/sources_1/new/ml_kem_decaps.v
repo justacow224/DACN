@@ -59,6 +59,9 @@ module ml_kem_decaps (
     reg [7:0] r_prime  [0:31];
     reg [7:0] k_reject [0:31];
     reg [7:0] ss_buf   [0:31];
+    reg [255:0] k_prime_vec;
+    reg [255:0] k_reject_vec;
+    reg         enc_ct_last_seen;
 
     reg         init_keccak;
     reg  [1:0]  hash_type;
@@ -96,8 +99,6 @@ module ml_kem_decaps (
 
     wire [7:0] compare_xor_byte = ct_buf[var_k[10:0]] ^ ct_prime_buf[var_k[10:0]];
     wire [7:0] compare_xor_next = xor_acc | compare_xor_byte;
-    wire [7:0] match_mask = {8{match_reg}};
-
     integer i;
 
     keccak_sponge_top u_keccak (
@@ -183,6 +184,8 @@ module ml_kem_decaps (
             out_rdata        <= 8'd0;
             out_valid        <= 1'b0;
             ss_out           <= 256'd0;
+            k_prime_vec      <= 256'd0;
+            k_reject_vec     <= 256'd0;
 
             init_keccak      <= 1'b0;
             hash_type        <= 2'b00;
@@ -206,6 +209,7 @@ module ml_kem_decaps (
             var_k            <= 12'd0;
             xor_acc          <= 8'd0;
             match_reg        <= 1'b0;
+            enc_ct_last_seen <= 1'b0;
         end else begin
             done             <= 1'b0;
             out_valid        <= 1'b0;
@@ -222,6 +226,9 @@ module ml_kem_decaps (
                 if (out_addr < 11'd32) out_rdata <= ss_buf[out_addr[4:0]];
                 else                    out_rdata <= 8'd0;
             end
+            if (enc_ct_we && (enc_ct_addr < 11'd1088) && (enc_ct_addr == 11'd1087)) begin
+                enc_ct_last_seen <= 1'b1;
+            end
 
             case (state)
                 S_IDLE: begin
@@ -231,6 +238,7 @@ module ml_kem_decaps (
                         var_k   <= 12'd0;
                         xor_acc <= 8'd0;
                         match_reg <= 1'b0;
+                        enc_ct_last_seen <= 1'b0;
                         for (i = 0; i < 32; i = i + 1) begin
                             m_prime[i]  <= 8'd0;
                             k_prime[i]  <= 8'd0;
@@ -239,6 +247,8 @@ module ml_kem_decaps (
                             ss_buf[i]   <= 8'd0;
                             ss_out[i*8 +: 8] <= 8'd0;
                         end
+                        k_prime_vec <= 256'd0;
+                        k_reject_vec <= 256'd0;
                         for (i = 0; i < 1088; i = i + 1) begin
                             ct_prime_buf[i] <= 8'd0;
                         end
@@ -327,6 +337,7 @@ module ml_kem_decaps (
                     if (k_dout_valid && fsm_k_dout_ready) begin
                         if (var_k < 12'd32) begin
                             k_prime[var_k[4:0]] <= k_dout;
+                            k_prime_vec[var_k[4:0]*8 +: 8] <= k_dout;
                         end else begin
                             r_prime[var_k - 12'd32] <= k_dout;
                         end
@@ -377,6 +388,7 @@ module ml_kem_decaps (
                 S_HASH_J_WAIT: begin
                     if (k_dout_valid && fsm_k_dout_ready) begin
                         k_reject[var_k[4:0]] <= k_dout;
+                        k_reject_vec[var_k[4:0]*8 +: 8] <= k_dout;
                         if (var_k == 12'd31) begin
                             fsm_k_dout_ready <= 1'b0;
                             var_k <= 12'd0;
@@ -417,6 +429,7 @@ module ml_kem_decaps (
                 end
 
                 S_ENC_START: begin
+                    enc_ct_last_seen <= 1'b0;
                     enc_start <= 1'b1;
                     state <= S_ENC_WAIT;
                 end
@@ -424,12 +437,16 @@ module ml_kem_decaps (
                 S_ENC_WAIT: begin
                     if (enc_done) begin
                         var_k <= 12'd0;
-                        state <= S_ENC_SETTLE;
+                        if (enc_ct_last_seen) begin
+                            state <= S_COMPARE_INIT;
+                        end else begin
+                            state <= S_ENC_SETTLE;
+                        end
                     end
                 end
 
                 S_ENC_SETTLE: begin
-                    if (var_k == 12'd2) begin
+                    if (enc_ct_last_seen || (var_k == 12'd4095)) begin
                         state <= S_COMPARE_INIT;
                     end else begin
                         var_k <= var_k + 12'd1;
@@ -456,16 +473,19 @@ module ml_kem_decaps (
 
                 // Constant-time MUX output
                 S_OUTPUT: begin
-                    ss_buf[var_k[4:0]] <= (k_prime[var_k[4:0]] & match_mask) |
-                                          (k_reject[var_k[4:0]] & ~match_mask);
-                    ss_out[var_k[4:0]*8 +: 8] <= (k_prime[var_k[4:0]] & match_mask) |
-                                                 (k_reject[var_k[4:0]] & ~match_mask);
-                    if (var_k == 12'd31) begin
-                        var_k <= 12'd0;
-                        state <= S_ZEROIZE;
+                    if (match_reg) begin
+                        ss_out <= k_prime_vec;
+                        for (i = 0; i < 32; i = i + 1) begin
+                            ss_buf[i] <= k_prime_vec[i*8 +: 8];
+                        end
                     end else begin
-                        var_k <= var_k + 12'd1;
+                        ss_out <= k_reject_vec;
+                        for (i = 0; i < 32; i = i + 1) begin
+                            ss_buf[i] <= k_reject_vec[i*8 +: 8];
+                        end
                     end
+                    var_k <= 12'd0;
+                    state <= S_ZEROIZE;
                 end
 
                 // Zeroize sensitive intermediates

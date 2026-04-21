@@ -691,7 +691,7 @@ S_DONE
 
 | Offset | Name | Width | R/W | Description |
 |--------|------|-------|-----|-------------|
-| 0x00 | CTRL | 32 | W | [0] start, [2:1] op_sel (0=KeyGen, 1=Encaps, 2=Decaps) |
+| 0x00 | CTRL | 32 | W | [0]: start, [2:1]: op_sel (0=KeyGen, 1=Encaps, 2=Decaps) |
 | 0x04 | STATUS | 32 | R | [0] done, [1] idle, [2] error |
 | 0x08 | CYCLES | 32 | R | Performance counter (cycles since start) |
 | 0x10–0x2C | SEED_D | 256 | W | 32-byte seed d (KeyGen only) |
@@ -701,6 +701,12 @@ S_DONE
 | 0x58 | CT_ADDR | 32 | W | DDR base address for ct |
 | 0x5C | SS_ADDR | 32 | W | DDR base address for shared secret |
 | 0x60 | M_ADDR | 32 | W | DDR base address for random m (Encaps) |
+
+> [!TIP]
+> **RTL Design Guidelines cho thanh ghi CTRL (0x00):**
+> 1. **Self-clearing Start Bit:** Logic xử lý bit `[0] (start)` nên được thiết kế dưới dạng xung (pulse) 1 chu kỳ clock, không giữ mức 1 để tránh trigger IP liên tục. FSM tự reset bit này về 0 ngay chu kỳ tiếp theo sau khi có lệnh Write.
+> 2. **Reserved Bits:** Các bit `[31:3]` hiện chưa định nghĩa. Khi thực hiện AXI read back thanh ghi này (nếu hỗ trợ), nên trả về `0`.
+> 3. **Sampling:** `op_sel` và `start` có thể được ghi đồng thời trong 1 lần AXI Write transaction. FSM cần sample `op_sel` ngay tại thời điểm `start` chuyển từ 0 lên 1.
 
 ## Flow cho mỗi Operation
 

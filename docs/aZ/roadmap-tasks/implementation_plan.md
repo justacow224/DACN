@@ -405,13 +405,19 @@ PS (ARM A53) ←→ AXI4-Lite (Control) ←→ ml_kem_top
 ```
 
 **AXI4-Lite Register Map:**
-| Offset | Name | R/W | Description |
-|--------|------|-----|-------------|
-| 0x00 | CTRL | W | [0] start, [1] op_sel (0=KeyGen, 1=Encaps, 2=Decaps) |
-| 0x04 | STATUS | R | [0] done, [1] idle |
-| 0x08 | CYCLES | R | Performance counter |
-| 0x10 | SEED_D_LO | W | seed_d[63:0] |
-| ... | ... | ... | ... |
+| Offset | Name      | R/W | Description                                          |
+|--------|-----------|-----|------------------------------------------------------|
+| 0x00   | CTRL      |  W  | [0]: start, [2:1]: op_sel (0=KeyGen, 1=Encaps, 2=Decaps) |
+| 0x04   | STATUS    |  R  | [0] done, [1] idle                                   |
+| 0x08   | CYCLES    |  R  | Performance counter                                  |
+| 0x10   | SEED_D_LO |  W  | seed_d[63:0]                                         |
+| ...    | ...       | ... | ...                                                  |
+
+> [!TIP]
+> **Lưu ý thiết kế RTL cho thanh ghi CTRL:**
+> - Bit `start` [0] cần được thiết kế tự xóa (self-clearing pulse), chỉ duy trì 1 cycle tránh kẹt FSM.
+> - Các bit `[31:3]` là Reserved, cố định bằng 0.
+> - FSM sample `op_sel` [2:1] đồng thời với xung `start`.
 
 **IP Cores instantiate bên trong:**
 - 1× `ml_kem_keygen`
