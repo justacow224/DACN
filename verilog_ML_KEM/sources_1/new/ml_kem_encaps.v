@@ -32,25 +32,37 @@ module ml_kem_encaps (
     output reg  [255:0] ss_out
 );
 
-    localparam [3:0] S_IDLE        = 4'd0;
-    localparam [3:0] S_HASH_H_INIT = 4'd1;
-    localparam [3:0] S_HASH_H_ABS  = 4'd2;
-    localparam [3:0] S_HASH_H_FIN  = 4'd3;
-    localparam [3:0] S_HASH_H_WAIT = 4'd4;
-    localparam [3:0] S_HASH_G_INIT = 4'd5;
-    localparam [3:0] S_HASH_G_ABS  = 4'd6;
-    localparam [3:0] S_HASH_G_FIN  = 4'd7;
-    localparam [3:0] S_HASH_G_WAIT = 4'd8;
-    localparam [3:0] S_ENC_PRELOAD = 4'd9;
-    localparam [3:0] S_ENC_START   = 4'd10;
-    localparam [3:0] S_ENC_WAIT    = 4'd11;
-    localparam [3:0] S_DONE        = 4'd12;
+    localparam [4:0] S_IDLE                 = 5'd0;
+    localparam [4:0] S_HASH_H_INIT          = 5'd1;
+    localparam [4:0] S_HASH_H_ABS           = 5'd2;  // send one byte to keccak
+    localparam [4:0] S_HASH_H_FIN           = 5'd3;
+    localparam [4:0] S_HASH_H_WAIT          = 5'd4;
+    localparam [4:0] S_HASH_G_INIT          = 5'd5;
+    localparam [4:0] S_HASH_G_ABS           = 5'd6;
+    localparam [4:0] S_HASH_G_FIN           = 5'd7;
+    localparam [4:0] S_HASH_G_WAIT          = 5'd8;
+    localparam [4:0] S_ENC_PRELOAD          = 5'd9;
+    localparam [4:0] S_ENC_START            = 5'd10;
+    localparam [4:0] S_ENC_WAIT             = 5'd11;
+    localparam [4:0] S_DONE                 = 5'd12;
+    localparam [4:0] S_HASH_H_REQ           = 5'd13;
+    localparam [4:0] S_ENC_PRELOAD_EK_REQ   = 5'd14;
+    localparam [4:0] S_ENC_PRELOAD_EK_SEND  = 5'd15;
+    localparam [4:0] S_HASH_H_RD_WAIT       = 5'd16;
+    localparam [4:0] S_ENC_PRELOAD_EK_WAIT  = 5'd17;
+    localparam [4:0] S_HASH_H_ADV           = 5'd18;
 
-    reg [3:0] state;
+    reg [4:0] state;
 
-    (* ram_style = "block" *) reg [7:0] ek_buf [0:1183];
-    (* ram_style = "block" *) reg [7:0] m_buf  [0:31];
-    (* ram_style = "block" *) reg [7:0] ct_buf [0:1087];
+    reg [7:0] m_buf  [0:31];
+    reg         ek_rd_en;
+    reg [10:0]  ek_rd_addr;
+    wire [7:0]  ek_rd_data;
+    reg         ct_rd_en;
+    reg [10:0]  ct_rd_addr;
+    wire [7:0]  ct_rd_data;
+    reg         ct_rd_pending;
+    reg         ct_rd_pending_d1;
 
     reg [7:0] h_buf  [0:31];
     reg [7:0] ss_buf [0:31];
@@ -83,6 +95,34 @@ module ml_kem_encaps (
     assign ct_we   = enc_ct_we;
     assign ct_addr = enc_ct_addr;
     assign ct_dout = enc_ct_dout;
+
+    xpm_ram_sdp_byte #(
+        .ADDR_WIDTH(11),
+        .DEPTH(2048),
+        .READ_LATENCY(1)
+    ) u_ek_buf_ram (
+        .clk    (clk),
+        .wr_en  (in_we && !busy && !in_sel && (in_addr < 11'd1184)),
+        .wr_addr(in_addr),
+        .wr_data(in_wdata),
+        .rd_en  (ek_rd_en),
+        .rd_addr(ek_rd_addr),
+        .rd_data(ek_rd_data)
+    );
+
+    xpm_ram_sdp_byte #(
+        .ADDR_WIDTH(11),
+        .DEPTH(2048),
+        .READ_LATENCY(1)
+    ) u_ct_buf_ram (
+        .clk    (clk),
+        .wr_en  (enc_ct_we && (enc_ct_addr < 11'd1088)),
+        .wr_addr(enc_ct_addr),
+        .wr_data(enc_ct_dout),
+        .rd_en  (ct_rd_en),
+        .rd_addr(ct_rd_addr),
+        .rd_data(ct_rd_data)
+    );
 
     keccak_sponge_top u_keccak (
         .clk(clk),
@@ -117,24 +157,13 @@ module ml_kem_encaps (
         .ct_dout(enc_ct_dout)
     );
 
-    // Keep byte-memory writes separate from FSM control for clearer BRAM inference.
     always @(posedge clk) begin
         if (in_we && !busy) begin
-            if (!in_sel) begin
-                if (in_addr < 11'd1184) begin
-                    ek_buf[in_addr] <= in_wdata;
-                end
-            end else begin
+            if (in_sel) begin
                 if (in_addr < 11'd32) begin
                     m_buf[in_addr[4:0]] <= in_wdata;
                 end
             end
-        end
-    end
-
-    always @(posedge clk) begin
-        if (enc_ct_we && (enc_ct_addr < 11'd1088)) begin
-            ct_buf[enc_ct_addr] <= enc_ct_dout;
         end
     end
 
@@ -145,6 +174,12 @@ module ml_kem_encaps (
             done             <= 1'b0;
             out_rdata        <= 8'd0;
             out_valid        <= 1'b0;
+            ek_rd_en         <= 1'b0;
+            ek_rd_addr       <= 11'd0;
+            ct_rd_en         <= 1'b0;
+            ct_rd_addr       <= 11'd0;
+            ct_rd_pending    <= 1'b0;
+            ct_rd_pending_d1 <= 1'b0;
             ss_out           <= 256'd0;
 
             init_keccak      <= 1'b0;
@@ -164,17 +199,38 @@ module ml_kem_encaps (
         end else begin
             done             <= 1'b0;
             out_valid        <= 1'b0;
+            ek_rd_en         <= 1'b0;
+            ct_rd_en         <= 1'b0;
             init_keccak      <= 1'b0;
             finalize_keccak  <= 1'b0;
             k_din_valid      <= 1'b0;
             enc_start        <= 1'b0;
             enc_in_we        <= 1'b0;
 
+            // 2-stage pipe: stage1 (ct_rd_pending) issues BRAM read, stage2
+            // (ct_rd_pending_d1) consumes ct_rd_data one cycle later when the
+            // synchronous BRAM output has actually settled.
+            ct_rd_pending_d1 <= ct_rd_pending;
+            ct_rd_pending    <= 1'b0;
+
+            if (ct_rd_pending_d1) begin
+                out_valid <= 1'b1;
+                out_rdata <= ct_rd_data;
+            end
+
             if (out_rd) begin
                 out_valid <= 1'b1;
                 if (!out_sel) begin
-                    if (out_addr < 11'd1088) out_rdata <= ct_buf[out_addr];
-                    else                      out_rdata <= 8'd0;
+                    if (out_addr < 11'd1088) begin
+                        out_valid <= 1'b0;
+                        ct_rd_en <= 1'b1;
+                        ct_rd_addr <= out_addr;
+                        ct_rd_pending <= 1'b1;
+                    end else begin
+                        out_rdata        <= 8'd0;
+                        ct_rd_pending    <= 1'b0;
+                        ct_rd_pending_d1 <= 1'b0;
+                    end
                 end else begin
                     if (out_addr < 11'd32) out_rdata <= ss_buf[out_addr[4:0]];
                     else                   out_rdata <= 8'd0;
@@ -187,6 +243,8 @@ module ml_kem_encaps (
                     if (start) begin
                         busy  <= 1'b1;
                         var_k <= 12'd0;
+                        ct_rd_pending    <= 1'b0;
+                        ct_rd_pending_d1 <= 1'b0;
                         state <= S_HASH_H_INIT;
                     end
                 end
@@ -196,20 +254,39 @@ module ml_kem_encaps (
                     init_keccak <= 1'b1;
                     hash_type   <= 2'b10; // SHA3-256
                     var_k       <= 12'd0;
-                    k_din       <= ek_buf[11'd0];
-                    k_din_valid <= 1'b1;
-                    state       <= S_HASH_H_ABS;
+                    state       <= S_HASH_H_REQ;
+                end
+
+                S_HASH_H_REQ: begin
+                    ek_rd_en   <= 1'b1;
+                    ek_rd_addr <= var_k[10:0];
+                    state      <= S_HASH_H_RD_WAIT;
+                end
+
+                // XPM BRAM has synchronous read: consume one cycle before using rd_data.
+                S_HASH_H_RD_WAIT: begin
+                    state <= S_HASH_H_ABS;
                 end
 
                 S_HASH_H_ABS: begin
+                    k_din <= ek_rd_data;
+                    k_din_valid <= 1'b1;
+                    state <= S_HASH_H_ADV;
+                end
+
+                // Handshake/advance step: hold k_din_valid high until keccak
+                // asserts ready, then deassert on the handshake cycle so the
+                // absorb fires exactly once (valid observable at T_{X+1} drops
+                // to 0 before keccak can latch the same byte a second time).
+                S_HASH_H_ADV: begin
                     k_din_valid <= 1'b1;
                     if (k_din_ready) begin
+                        k_din_valid <= 1'b0;
                         if (var_k == 12'd1183) begin
-                            k_din_valid <= 1'b0;
                             state <= S_HASH_H_FIN;
                         end else begin
-                            var_k       <= var_k + 12'd1;
-                            k_din       <= ek_buf[var_k + 12'd1];
+                            var_k <= var_k + 12'd1;
+                            state <= S_HASH_H_REQ;
                         end
                     end
                 end
@@ -285,18 +362,16 @@ module ml_kem_encaps (
 
                 // Preload encrypt core with ek/m/r
                 S_ENC_PRELOAD: begin
-                    enc_in_we <= 1'b1;
                     if (var_k < 12'd1184) begin
-                        enc_in_sel   <= 2'd0;
-                        enc_in_addr  <= var_k[10:0];
-                        enc_in_wdata <= ek_buf[var_k[10:0]];
-                        var_k        <= var_k + 12'd1;
+                        state <= S_ENC_PRELOAD_EK_REQ;
                     end else if (var_k < 12'd1216) begin
+                        enc_in_we    <= 1'b1;
                         enc_in_sel   <= 2'd1;
                         enc_in_addr  <= var_k[10:0] - 11'd1184;
                         enc_in_wdata <= m_buf[var_k - 12'd1184];
                         var_k        <= var_k + 12'd1;
                     end else if (var_k < 12'd1248) begin
+                        enc_in_we    <= 1'b1;
                         enc_in_sel   <= 2'd2;
                         enc_in_addr  <= var_k[10:0] - 11'd1216;
                         enc_in_wdata <= r_buf[var_k - 12'd1216];
@@ -310,6 +385,26 @@ module ml_kem_encaps (
                         var_k <= 12'd0;
                         state <= S_ENC_START;
                     end
+                end
+
+                S_ENC_PRELOAD_EK_REQ: begin
+                    ek_rd_en   <= 1'b1;
+                    ek_rd_addr <= var_k[10:0];
+                    state      <= S_ENC_PRELOAD_EK_WAIT;
+                end
+
+                // Align EK preload with synchronous BRAM read latency.
+                S_ENC_PRELOAD_EK_WAIT: begin
+                    state <= S_ENC_PRELOAD_EK_SEND;
+                end
+
+                S_ENC_PRELOAD_EK_SEND: begin
+                    enc_in_we    <= 1'b1;
+                    enc_in_sel   <= 2'd0;
+                    enc_in_addr  <= var_k[10:0];
+                    enc_in_wdata <= ek_rd_data;
+                    var_k        <= var_k + 12'd1;
+                    state        <= S_ENC_PRELOAD;
                 end
 
                 S_ENC_START: begin

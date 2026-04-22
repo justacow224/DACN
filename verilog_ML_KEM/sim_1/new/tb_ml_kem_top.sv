@@ -77,6 +77,13 @@ module tb_ml_kem_top;
     reg [7:0] ss_enc [0:31];
     reg [7:0] ss_dec [0:31];
     integer i;
+    integer dbg_sk_vs_ddr;
+    integer dbg_dk_vs_ddr;
+    integer dbg_ct_vs_ddr;
+    integer dbg_dk_vs_sk;
+    integer dbg_pk_vs_sk_pk;
+    integer dbg_h_keygen_vs_encaps;
+    integer dbg_h_keygen_vs_sk;
 
     ml_kem_top #(
         .C_S_AXI_ADDR_WIDTH(C_S_AXI_ADDR_WIDTH),
@@ -502,6 +509,63 @@ module tb_ml_kem_top;
         end
     end
 
+    // ----------------------------------------------------------------
+    // Probe aliases for Gate B hierarchical taps into g_crypto_real.*
+    // When TB_BYPASS_CRYPTO=1, g_crypto_real isn't elaborated, so the
+    // real-path assigns live inside an inactive generate branch and
+    // the elaborator only sees the zeroed fallback. Gate B code path
+    // is runtime-guarded by dut.BYPASS_CRYPTO, so zeros never get read
+    // in Gate A mode.
+    // ----------------------------------------------------------------
+    wire [7:0]  probe_h_pk_reg [0:31];
+    wire [7:0]  probe_encaps_h_buf [0:31];
+    wire [7:0]  probe_dec_k_prime [0:31];
+    wire [7:0]  probe_dec_k_reject [0:31];
+    wire        probe_dec_match_reg;
+    wire [31:0] probe_dec_xor_acc;
+    wire [31:0] probe_dec_cmp_seen;
+    wire [31:0] probe_dec_cmp_idx;
+    wire [7:0]  probe_dec_ct_byte;
+    wire [7:0]  probe_dec_ct_prime_byte;
+    wire [31:0] probe_dec_enc_ct_count;
+    wire [7:0]  probe_dec_m_out;
+
+    generate
+        if (TB_BYPASS_CRYPTO == 0) begin : g_probe
+            genvar gi;
+            for (gi = 0; gi < 32; gi = gi + 1) begin : g_arr
+                assign probe_h_pk_reg[gi]     = probe_h_pk_reg[gi];
+                assign probe_encaps_h_buf[gi] = probe_encaps_h_buf[gi];
+                assign probe_dec_k_prime[gi]  = probe_dec_k_prime[gi];
+                assign probe_dec_k_reject[gi] = probe_dec_k_reject[gi];
+            end
+            assign probe_dec_match_reg      = probe_dec_match_reg;
+            assign probe_dec_xor_acc        = probe_dec_xor_acc;
+            assign probe_dec_cmp_seen       = probe_dec_cmp_seen;
+            assign probe_dec_cmp_idx        = probe_dec_cmp_idx;
+            assign probe_dec_ct_byte        = probe_dec_ct_byte;
+            assign probe_dec_ct_prime_byte  = probe_dec_ct_prime_byte;
+            assign probe_dec_enc_ct_count   = probe_dec_enc_ct_count;
+            assign probe_dec_m_out          = probe_dec_m_out;
+        end else begin : g_probe
+            genvar gi2;
+            for (gi2 = 0; gi2 < 32; gi2 = gi2 + 1) begin : g_arr
+                assign probe_h_pk_reg[gi2]     = 8'd0;
+                assign probe_encaps_h_buf[gi2] = 8'd0;
+                assign probe_dec_k_prime[gi2]  = 8'd0;
+                assign probe_dec_k_reject[gi2] = 8'd0;
+            end
+            assign probe_dec_match_reg      = 1'b0;
+            assign probe_dec_xor_acc        = 32'd0;
+            assign probe_dec_cmp_seen       = 32'd0;
+            assign probe_dec_cmp_idx        = 32'd0;
+            assign probe_dec_ct_byte        = 8'd0;
+            assign probe_dec_ct_prime_byte  = 8'd0;
+            assign probe_dec_enc_ct_count   = 32'd0;
+            assign probe_dec_m_out          = 8'd0;
+        end
+    endgenerate
+
     initial begin
         clk = 1'b0;
         rst_n = 1'b0;
@@ -680,6 +744,72 @@ module tb_ml_kem_top;
                 end
             end
             if (rd != 32'd0) begin
+                dbg_sk_vs_ddr = 0;
+                dbg_dk_vs_ddr = 0;
+                dbg_ct_vs_ddr = 0;
+                dbg_dk_vs_sk  = 0;
+                dbg_pk_vs_sk_pk = 0;
+                dbg_h_keygen_vs_encaps = 0;
+                dbg_h_keygen_vs_sk = 0;
+                for (i = 0; i < 2400; i = i + 1) begin
+                    if (dut.sk_mem[i] !== ddr_mem[SK_BASE + i]) dbg_sk_vs_ddr = dbg_sk_vs_ddr + 1;
+                    if (dut.dk_mem[i] !== ddr_mem[SK_BASE + i]) dbg_dk_vs_ddr = dbg_dk_vs_ddr + 1;
+                    if (dut.dk_mem[i] !== dut.sk_mem[i])        dbg_dk_vs_sk  = dbg_dk_vs_sk  + 1;
+                end
+                for (i = 0; i < 1088; i = i + 1) begin
+                    if (dut.ct_mem[i] !== ddr_mem[CT_BASE + i]) dbg_ct_vs_ddr = dbg_ct_vs_ddr + 1;
+                end
+                for (i = 0; i < 1184; i = i + 1) begin
+                    if (dut.pk_mem[i] !== dut.sk_mem[1152 + i]) begin
+                        dbg_pk_vs_sk_pk = dbg_pk_vs_sk_pk + 1;
+                    end
+                end
+                for (i = 0; i < 32; i = i + 1) begin
+                    if (probe_h_pk_reg[i] !== probe_encaps_h_buf[i]) begin
+                        dbg_h_keygen_vs_encaps = dbg_h_keygen_vs_encaps + 1;
+                    end
+                    if (probe_h_pk_reg[i] !== dut.sk_mem[2336 + i]) begin
+                        dbg_h_keygen_vs_sk = dbg_h_keygen_vs_sk + 1;
+                    end
+                end
+                $display("DBG GateB top ss_enc[0..3]=%02x %02x %02x %02x", ss_enc[0], ss_enc[1], ss_enc[2], ss_enc[3]);
+                $display("DBG GateB top ss_dec[0..3]=%02x %02x %02x %02x", ss_dec[0], ss_dec[1], ss_dec[2], ss_dec[3]);
+                $display("DBG GateB h keygen[0..3]=%02x %02x %02x %02x encaps.h[0..3]=%02x %02x %02x %02x",
+                         probe_h_pk_reg[0], probe_h_pk_reg[1],
+                         probe_h_pk_reg[2], probe_h_pk_reg[3],
+                         probe_encaps_h_buf[0], probe_encaps_h_buf[1],
+                         probe_encaps_h_buf[2], probe_encaps_h_buf[3]);
+                $display("DBG GateB dec match_reg=%0d xor_acc=%02x cmp_seen=%0d idx=%0d ct=%02x ct_prime=%02x enc_ct_count=%0d",
+                         probe_dec_match_reg,
+                         probe_dec_xor_acc,
+                         probe_dec_cmp_seen,
+                         probe_dec_cmp_idx,
+                         probe_dec_ct_byte,
+                         probe_dec_ct_prime_byte,
+                         probe_dec_enc_ct_count);
+                $display("DBG GateB dec k' [0..3]=%02x %02x %02x %02x  rej[0..3]=%02x %02x %02x %02x",
+                         probe_dec_k_prime[0], probe_dec_k_prime[1],
+                         probe_dec_k_prime[2], probe_dec_k_prime[3],
+                         probe_dec_k_reject[0], probe_dec_k_reject[1],
+                         probe_dec_k_reject[2], probe_dec_k_reject[3]);
+                $display("DBG GateB dk/sk checkpoints: sk[0]=%02x dk[0]=%02x sk[1152]=%02x dk[1152]=%02x sk[2336]=%02x dk[2336]=%02x sk[2368]=%02x dk[2368]=%02x",
+                         dut.sk_mem[0], dut.dk_mem[0],
+                         dut.sk_mem[1152], dut.dk_mem[1152],
+                         dut.sk_mem[2336], dut.dk_mem[2336],
+                         dut.sk_mem[2368], dut.dk_mem[2368]);
+                $display("DBG GateB pk/sk copy checkpoints: pk[0..3]=%02x %02x %02x %02x sk[1152..1155]=%02x %02x %02x %02x",
+                         dut.pk_mem[0], dut.pk_mem[1], dut.pk_mem[2], dut.pk_mem[3],
+                         dut.sk_mem[1152], dut.sk_mem[1153], dut.sk_mem[1154], dut.sk_mem[1155]);
+                $display("DBG GateB h/z checkpoints: keygen.h[0..3]=%02x %02x %02x %02x sk[2336..2339]=%02x %02x %02x %02x z[2368..2371]=%02x %02x %02x %02x",
+                         probe_h_pk_reg[0], probe_h_pk_reg[1],
+                         probe_h_pk_reg[2], probe_h_pk_reg[3],
+                         dut.sk_mem[2336], dut.sk_mem[2337], dut.sk_mem[2338], dut.sk_mem[2339],
+                         dut.sk_mem[2368], dut.sk_mem[2369], dut.sk_mem[2370], dut.sk_mem[2371]);
+                $display("DBG GateB mem consistency: sk_vs_ddr=%0d dk_vs_ddr=%0d ct_vs_ddr=%0d dk_vs_sk=%0d m[0]=%02x dec_m0=%02x",
+                         dbg_sk_vs_ddr, dbg_dk_vs_ddr, dbg_ct_vs_ddr, dbg_dk_vs_sk,
+                         ddr_mem[M_BASE + 0], probe_dec_m_out);
+                $display("DBG GateB key consistency: pk_vs_skpk=%0d keygen_h_vs_encaps_h=%0d keygen_h_vs_sk_h=%0d",
+                         dbg_pk_vs_sk_pk, dbg_h_keygen_vs_encaps, dbg_h_keygen_vs_sk);
                 $fatal(1, "Gate B ss mismatch count=%0d", rd);
             end
         end

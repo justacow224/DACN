@@ -154,7 +154,11 @@ module kpke_encrypt (
     (* ram_style = "block" *) reg [7:0] ek_buf [0:1183];
     reg [7:0] m_buf [0:31];
     reg [7:0] r_buf [0:31];
-    (* ram_style = "block" *) reg [7:0] ct_buf [0:1087];
+    reg         ct_rd_en;
+    reg [10:0]  ct_rd_addr;
+    wire [7:0]  ct_rd_data;
+    reg         ct_rd_pending;
+    reg         ct_rd_pending_d1;
 
     // =============================================================
     // Internal memories (Phase-2 banked style)
@@ -208,7 +212,6 @@ module kpke_encrypt (
     reg [1:0] comp_d_sel_reg;
     reg       comp_mode_v;
 
-    integer clr_i;
 
     // =============================================================
     // Synchronous read adapters and memory read registers
@@ -638,6 +641,21 @@ module kpke_encrypt (
     assign ct_addr = comp_base_offset + {2'b00, comp_byte_addr};
     assign ct_dout = comp_byte_dout;
 
+    xpm_ram_sdp_byte #(
+        .ADDR_WIDTH(11),
+        .DEPTH(2048),
+        .READ_LATENCY(1)
+    ) u_ct_buf_ram (
+        .clk    (clk),
+        .wr_en  ((((state == S_COMP_U_WAIT) || (state == S_COMP_V_WAIT)) && comp_byte_we &&
+                  ((comp_base_offset + {2'b00, comp_byte_addr}) < 11'd1088))),
+        .wr_addr(comp_base_offset + {2'b00, comp_byte_addr}),
+        .wr_data(comp_byte_dout),
+        .rd_en  (ct_rd_en),
+        .rd_addr(ct_rd_addr),
+        .rd_data(ct_rd_data)
+    );
+
     // =============================================================
     // Byte buffer process
     // =============================================================
@@ -647,6 +665,12 @@ module kpke_encrypt (
                 2'd0: begin
                     if (in_addr < 11'd1184) begin
                         ek_buf[in_addr] <= in_wdata;
+                        // Capture rho slice (ek bytes 1152..1183) on-the-fly so
+                        // we don't later need a 32-way parallel read of ek_buf,
+                        // which would kill BRAM inference on the whole array.
+                        if (in_addr >= 11'd1152) begin
+                            rho_reg[in_addr[4:0]] <= in_wdata;
+                        end
                     end
                 end
                 2'd1: begin
@@ -665,11 +689,6 @@ module kpke_encrypt (
 
         fromb_byte_din_r  <= ek_buf[fromb_abs_addr];
 
-        if (((state == S_COMP_U_WAIT) || (state == S_COMP_V_WAIT)) && comp_byte_we) begin
-            if ((comp_base_offset + {2'b00, comp_byte_addr}) < 11'd1088) begin
-                ct_buf[comp_base_offset + {2'b00, comp_byte_addr}] <= comp_byte_dout;
-            end
-        end
     end
 
     // =============================================================
@@ -846,6 +865,10 @@ module kpke_encrypt (
             done             <= 1'b0;
             out_rdata        <= 8'd0;
             out_valid        <= 1'b0;
+            ct_rd_en         <= 1'b0;
+            ct_rd_addr       <= 11'd0;
+            ct_rd_pending    <= 1'b0;
+            ct_rd_pending_d1 <= 1'b0;
 
             init_keccak      <= 1'b0;
             hash_type        <= 2'b00;
@@ -876,18 +899,34 @@ module kpke_encrypt (
         end else begin
             done             <= 1'b0;
             out_valid        <= 1'b0;
+            ct_rd_en         <= 1'b0;
             init_keccak      <= 1'b0;
             finalize_keccak  <= 1'b0;
             k_din_valid      <= 1'b0;
             cbd_start        <= 1'b0;
             parse_start      <= 1'b0;
 
-            if (out_rd) begin
+            // 2-stage pipe: stage1 (ct_rd_pending) issues BRAM read, stage2
+            // (ct_rd_pending_d1) consumes ct_rd_data one cycle later when the
+            // synchronous BRAM output has actually settled.
+            ct_rd_pending_d1 <= ct_rd_pending;
+            ct_rd_pending    <= 1'b0;
+
+            if (ct_rd_pending_d1) begin
                 out_valid <= 1'b1;
+                out_rdata <= ct_rd_data;
+            end
+
+            if (out_rd) begin
                 if (out_addr < 11'd1088) begin
-                    out_rdata <= ct_buf[out_addr];
+                    ct_rd_en      <= 1'b1;
+                    ct_rd_addr    <= out_addr;
+                    ct_rd_pending <= 1'b1;
                 end else begin
-                    out_rdata <= 8'd0;
+                    out_valid        <= 1'b1;
+                    out_rdata        <= 8'd0;
+                    ct_rd_pending    <= 1'b0;
+                    ct_rd_pending_d1 <= 1'b0;
                 end
             end
 
@@ -896,6 +935,8 @@ module kpke_encrypt (
                     busy <= 1'b0;
                     if (start) begin
                         busy             <= 1'b1;
+                        ct_rd_pending    <= 1'b0;
+                        ct_rd_pending_d1 <= 1'b0;
                         decode_idx       <= 2'd0;
                         noise_stage      <= 2'd0;
                         noise_idx        <= 2'd0;
@@ -925,9 +966,10 @@ module kpke_encrypt (
                 S_DECODE_EK_WAIT: begin
                     if (fromb_done) begin
                         if (decode_idx == 2'd2) begin
-                            for (clr_i = 0; clr_i < 32; clr_i = clr_i + 1) begin
-                                rho_reg[clr_i] <= ek_buf[11'd1152 + clr_i[10:0]];
-                            end
+                            // rho_reg already populated at ek preload time
+                            // (see byte-buffer always block above) so we can
+                            // skip the legacy 32-way parallel read that used
+                            // to live here and block BRAM inference on ek_buf.
                             noise_stage <= 2'd0;
                             noise_idx   <= 2'd0;
                             state       <= S_NOISE_INIT;

@@ -924,9 +924,7 @@ module ml_kem_keygen (
                 end
 
                 S_PACK_SK_PK_WAIT: begin
-                    // Prime one more read so WRITE can stream continuously at 1 byte/cycle.
-                    pk_buf_rd_addr <= 11'd1;
-                    pk_buf_rd_en <= 1;
+                    // Consume one read-latency cycle for pk_buf.
                     state <= S_PACK_SK_PK_WRITE;
                 end
 
@@ -936,14 +934,12 @@ module ml_kem_keygen (
                         var_k <= 0;
                         state <= S_PACK_SK_HPK;
                     end else begin
+                        // Issue next read, then wait one cycle before next write to
+                        // align with synchronous BRAM read latency.
                         var_k <= var_k + 1;
-                        if (var_k <= 1181) begin
-                            pk_buf_rd_addr <= var_k[10:0] + 11'd2;
-                            pk_buf_rd_en <= 1;
-                        end else begin
-                            pk_buf_rd_en <= 0;
-                        end
-                        state <= S_PACK_SK_PK_WRITE;
+                        pk_buf_rd_addr <= var_k[10:0] + 11'd1;
+                        pk_buf_rd_en <= 1;
+                        state <= S_PACK_SK_PK_WAIT;
                     end
                 end
 

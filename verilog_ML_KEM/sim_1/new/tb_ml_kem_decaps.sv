@@ -215,6 +215,13 @@ module tb_ml_kem_decaps;
 
                 for (i = 0; i < 32; i = i + 1) begin
                     if (got_ss_match[i] !== exp_ss[i]) begin
+                        if (i == 0) begin
+                            $display("DBG match_reg=%0d xor_acc=%02x k_prime[0]=%02x k_reject[0]=%02x",
+                                     dut.match_reg, dut.xor_acc, dut.k_prime[0], dut.k_reject[0]);
+                            $display("DBG cmp_seen=%0d idx=%0d ct=%02x ct_prime=%02x enc_ct_count=%0d dec_m0=%02x",
+                                     dut.dbg_cmp_seen, dut.dbg_cmp_idx, dut.dbg_ct_byte, dut.dbg_ct_prime_byte,
+                                     dut.dbg_enc_ct_count, dut.dec_m_out[7:0]);
+                        end
                         $display("ERROR: KAT #%0d match ss mismatch at [%0d]: exp=%02x got=%02x",
                                  kat_count, i, exp_ss[i], got_ss_match[i]);
                         err_count = err_count + 1;
