@@ -159,9 +159,10 @@ def main():
         'KAT_FILE',
         os.path.join(script_dir, 'KAT_768.txt'),
     )
+    # Board default: /root/jupyter_notebooks/verilog_ML_KEM/bitstream/ml_kem_bd.{bit,hwh}
     bitfile = os.environ.get(
         'ML_KEM_BIT',
-        os.path.join(script_dir, 'ml_kem.bit'),
+        '/root/jupyter_notebooks/verilog_ML_KEM/bitstream/ml_kem_bd.bit',
     )
 
     print(f"Bitfile : {bitfile}")

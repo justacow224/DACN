@@ -163,11 +163,11 @@ def parse_args():
 def main():
     args = parse_args()
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Board default: /root/jupyter_notebooks/verilog_ML_KEM/bitstream/ml_kem_bd.{bit,hwh}
     bitfile = (
         args.bit
         or os.environ.get('ML_KEM_BIT')
-        or os.path.join(script_dir, 'ml_kem.bit')
+        or '/root/jupyter_notebooks/verilog_ML_KEM/bitstream/ml_kem_bd.bit'
     )
 
     print(f"Benchmark: {args.n} iterations / op")

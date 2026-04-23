@@ -257,7 +257,11 @@ def cycles_to_us(cycles, clk_hz=PL_CLK_HZ):
 if __name__ == '__main__':
     # Tiny smoke test — confirms overlay loads, CTRL reset state is 0,
     # and all three ops run end-to-end with round-trip ss consistency.
-    bitfile = os.environ.get('ML_KEM_BIT', 'ml_kem.bit')
+    # Board default: bitstream + hwh live under /root/jupyter_notebooks/verilog_ML_KEM/bitstream/
+    bitfile = os.environ.get(
+        'ML_KEM_BIT',
+        '/root/jupyter_notebooks/verilog_ML_KEM/bitstream/ml_kem_bd.bit',
+    )
     print(f"Loading overlay: {bitfile}")
     with MLKem768(bitfile) as kem:
         # Reset-state sanity
