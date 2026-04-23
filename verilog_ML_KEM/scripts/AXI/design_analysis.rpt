@@ -1,0 +1,54 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+---------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2025.1 (win64) Build 6140274 Thu May 22 00:12:29 MDT 2025
+| Date         : Thu Apr 23 15:21:42 2026
+| Host         : aZinh running 64-bit major release  (build 9200)
+| Command      : report_design_analysis -timing -file D:/HCMUT/Year_4/252/CA/Source/DACN/verilog_ML_KEM/scripts/AXI/design_analysis.rpt
+| Design       : ml_kem_bd_wrapper
+| Device       : xck26
+| Design State : Routed
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+Report Design Analysis
+
+Table of Contents
+-----------------
+1. Setup Path Characteristics 1-1
+
+1. Setup Path Characteristics 1-1
+---------------------------------
+
++---------------------------+-------------------------------+
+|      Characteristics      |            Path #1            |
++---------------------------+-------------------------------+
+| Requirement               | 10.000                        |
+| Path Delay                | 8.822                         |
+| Logic Delay               | 0.194(3%)                     |
+| Net Delay                 | 8.628(97%)                    |
+| Clock Skew                | -0.264                        |
+| Slack                     | 0.797                         |
+| Clock Uncertainty         | 0.160                         |
+| Clock Pair Classification | Partial False Path            |
+| Clock Delay Group         | -                             |
+| Logic Levels              | 1                             |
+| Routes                    | 1                             |
+| Logical Path              | FDRE/C-(1680)-LUT6-(1)-FDRE/D |
+| Start Point Clock         | clk_pl_0                      |
+| End Point Clock           | clk_pl_0                      |
+| DSP Block                 | None                          |
+| RAM Registers             | None-None                     |
+| IO Crossings              | 5                             |
+| SLR Crossings             | 0                             |
+| PBlocks                   | 0                             |
+| High Fanout               | 1680                          |
+| ASYNC REG                 | 0                             |
+| Dont Touch                | 0                             |
+| Mark Debug                | 0                             |
+| Start Point Pin Primitive | FDRE/C                        |
+| End Point Pin Primitive   | FDRE/D                        |
+| Start Point Pin           | state_reg[1]/C                |
+| End Point Pin             | state_reg_reg[62][4]/D        |
++---------------------------+-------------------------------+
+* Bounding box calculated as % of dimensions for the target device (2818, 498)
+
+
