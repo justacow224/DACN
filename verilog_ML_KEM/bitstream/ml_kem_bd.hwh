@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
-<EDKSYSTEM EDWVERSION="1.2" TIMESTAMP="Thu Apr 23 01:22:07 2026" VIVADOVERSION="2025.1">
+<EDKSYSTEM EDWVERSION="1.2" TIMESTAMP="Sat Apr 25 17:10:29 2026" VIVADOVERSION="2025.1">
 
   <SYSTEMINFO ARCH="zynquplus" BOARD="xilinx.com:kr260_som:part0:1.1" DEVICE="xck26" NAME="ml_kem_bd" PACKAGE="sfvc784" SPEEDGRADE="-2LV"/>
 
@@ -3381,10 +3381,10 @@
           <CONNECTIONS>
             <CONNECTION INSTANCE="zynq_ultra_ps_e_0" PORT="maxihpm0_fpd_aclk"/>
             <CONNECTION INSTANCE="axi_smc" PORT="aclk"/>
-            <CONNECTION INSTANCE="ml_kem_top_0" PORT="clk"/>
             <CONNECTION INSTANCE="rst_ps8_0_99M" PORT="slowest_sync_clk"/>
             <CONNECTION INSTANCE="axi_smc_1" PORT="aclk"/>
             <CONNECTION INSTANCE="zynq_ultra_ps_e_0" PORT="saxihpc0_fpd_aclk"/>
+            <CONNECTION INSTANCE="ml_kem_top_0" PORT="clk"/>
           </CONNECTIONS>
         </PORT>
         <PORT DIR="I" LEFT="0" NAME="pl_ps_irq0" RIGHT="0" SENSITIVITY="LEVEL_HIGH" SIGIS="INTERRUPT"/>

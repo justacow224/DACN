@@ -59,4 +59,8 @@ set_property ROM_STYLE BLOCK [get_cells -hier -filter {NAME =~ *inv_zeta_rom*}]
 #   set_property USED_IN_IMPLEMENTATION 1 [get_files *ml_kem_kr260.xdc]
 # ---------------------------------------------------------------
 
-create_clock -period 10.000 -name ooc_clk [get_ports clk]
+# NOTE: do not add `create_clock [get_ports clk]` here. BD wrapper does not
+# expose `clk` as a top-level port (PS pl_clk0 is auto-constrained by the
+# Zynq UltraScale+ IP as `clk_pl_0`). For OOC standalone QoR of ml_kem_top,
+# the placeholder clock lives in scripts/AXI/batch6_ooc_qor.tcl only.
+
