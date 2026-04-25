@@ -124,8 +124,7 @@ module tb_ml_kem_encaps;
                 $display("DBG KAT1 preload pk[0..3]=%02x %02x %02x %02x m[0..3]=%02x %02x %02x %02x",
                          pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
                          m_bytes[0],  m_bytes[1],  m_bytes[2],  m_bytes[3]);
-                $display("DBG KAT1 dutbuf  ek[0..3]=%02x %02x %02x %02x m[0..3]=%02x %02x %02x %02x",
-                         dut.ek_buf[0], dut.ek_buf[1], dut.ek_buf[2], dut.ek_buf[3],
+                $display("DBG KAT1 dutbuf  m[0..3]=%02x %02x %02x %02x",
                          dut.m_buf[0],  dut.m_buf[1],  dut.m_buf[2],  dut.m_buf[3]);
             end
 

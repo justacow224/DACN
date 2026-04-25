@@ -58,3 +58,5 @@ set_property ROM_STYLE BLOCK [get_cells -hier -filter {NAME =~ *inv_zeta_rom*}]
 #   set_property USED_IN_SYNTHESIS     1 [get_files *ml_kem_kr260.xdc]
 #   set_property USED_IN_IMPLEMENTATION 1 [get_files *ml_kem_kr260.xdc]
 # ---------------------------------------------------------------
+
+create_clock -period 10.000 -name ooc_clk [get_ports clk]

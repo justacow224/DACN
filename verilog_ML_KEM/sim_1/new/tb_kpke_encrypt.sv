@@ -312,6 +312,7 @@ module tb_kpke_encrypt;
     integer cyc_enc;
     integer cyc_dec;
     string  line;
+    string  kat_file;
     bit have_d;
     bit have_z;
 
@@ -334,9 +335,14 @@ module tb_kpke_encrypt;
         dec_out_rd = 1'b0;
         dec_out_addr = 5'd0;
 
-        fd = $fopen("D:/HCMUT/Year_4/252/CA/Source/DACN/vitis_ML_KEM/src/KAT_768.txt", "r");
+        kat_file = "./KAT_768.txt";
+        if ($value$plusargs("KAT_FILE=%s", kat_file)) begin
+            $display("INFO: Override KAT_FILE=%s", kat_file);
+        end
+
+        fd = $fopen(kat_file, "r");
         if (fd == 0) begin
-            $display("ERROR: Cannot open KAT_768.txt");
+            $display("ERROR: Cannot open KAT_768.txt at %s", kat_file);
             $finish;
         end
 

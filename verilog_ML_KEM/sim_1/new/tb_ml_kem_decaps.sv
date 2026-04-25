@@ -147,6 +147,7 @@ module tb_ml_kem_decaps;
     integer cycles_fail;
     integer timing_diff;
     string line;
+    string kat_file;
     bit have_sk;
     bit have_ct;
     bit have_ss;
@@ -163,9 +164,14 @@ module tb_ml_kem_decaps;
         out_rd   = 1'b0;
         out_addr = 11'd0;
 
-        fd = $fopen("D:/HCMUT/Year_4/252/CA/Source/DACN/vitis_ML_KEM/src/KAT_768.txt", "r");
+        kat_file = "./KAT_768.txt";
+        if ($value$plusargs("KAT_FILE=%s", kat_file)) begin
+            $display("INFO: Override KAT_FILE=%s", kat_file);
+        end
+
+        fd = $fopen(kat_file, "r");
         if (fd == 0) begin
-            $display("ERROR: Cannot open KAT_768.txt");
+            $display("ERROR: Cannot open KAT_768.txt at %s", kat_file);
             $finish;
         end
 
@@ -220,7 +226,7 @@ module tb_ml_kem_decaps;
                                      dut.match_reg, dut.xor_acc, dut.k_prime[0], dut.k_reject[0]);
                             $display("DBG cmp_seen=%0d idx=%0d ct=%02x ct_prime=%02x enc_ct_count=%0d dec_m0=%02x",
                                      dut.dbg_cmp_seen, dut.dbg_cmp_idx, dut.dbg_ct_byte, dut.dbg_ct_prime_byte,
-                                     dut.dbg_enc_ct_count, dut.dec_m_out[7:0]);
+                                     dut.dbg_enc_ct_count, dut.core_m_out[7:0]);
                         end
                         $display("ERROR: KAT #%0d match ss mismatch at [%0d]: exp=%02x got=%02x",
                                  kat_count, i, exp_ss[i], got_ss_match[i]);
