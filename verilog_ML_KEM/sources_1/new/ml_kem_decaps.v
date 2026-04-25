@@ -1,6 +1,8 @@
 `timescale 1ns / 1ps
 
-module ml_kem_decaps (
+module ml_kem_decaps #(
+    parameter HAS_INTERNAL_KECCAK = 1
+) (
     input  wire         clk,
     input  wire         rst_n,
     input  wire         start,
@@ -22,7 +24,18 @@ module ml_kem_decaps (
     output reg          out_valid,
 
     // Packed shared secret output
-    output reg  [255:0] ss_out
+    output reg  [255:0] ss_out,
+
+    // External keccak interface, used only when HAS_INTERNAL_KECCAK == 0.
+    output wire         ext_k_init,
+    output wire [1:0]   ext_k_hash_type,
+    output wire         ext_k_finalize,
+    output wire [7:0]   ext_k_din,
+    output wire         ext_k_din_valid,
+    input  wire         ext_k_din_ready,
+    input  wire [7:0]   ext_k_dout,
+    input  wire         ext_k_dout_valid,
+    output wire         ext_k_dout_ready
 );
 
     localparam [4:0] S_IDLE          = 5'd0;
@@ -97,25 +110,49 @@ module ml_kem_decaps (
     wire        k_dout_valid;
     reg         fsm_k_dout_ready;
 
-    reg         dec_start;
-    reg         dec_in_we;
-    reg         dec_in_sel;
-    reg  [10:0] dec_in_addr;
-    reg  [7:0]  dec_in_wdata;
-    wire        dec_busy;
-    wire        dec_done;
-    wire [255:0] dec_m_out;
+    reg         core_start;
+    reg  [1:0]  core_mode;
+    reg         core_in_we;
+    reg  [1:0]  core_in_sel;
+    reg  [10:0] core_in_addr;
+    reg  [7:0]  core_in_wdata;
+    wire        core_done;
+    wire [255:0] core_m_out;
+    wire        core_ct_we;
+    wire [10:0] core_ct_addr;
+    wire [7:0]  core_ct_dout;
+    wire        core_k_init;
+    wire [1:0]  core_k_hash_type;
+    wire        core_k_finalize;
+    wire [7:0]  core_k_din;
+    wire        core_k_din_valid;
+    wire        core_k_din_ready;
+    wire [7:0]  core_k_dout;
+    wire        core_k_dout_valid;
+    wire        core_k_dout_ready;
 
-    reg         enc_start;
-    reg         enc_in_we;
-    reg  [1:0]  enc_in_sel;
-    reg  [10:0] enc_in_addr;
-    reg  [7:0]  enc_in_wdata;
-    wire        enc_busy;
-    wire        enc_done;
-    wire        enc_ct_we;
-    wire [10:0] enc_ct_addr;
-    wire [7:0]  enc_ct_dout;
+    wire        core_owns_keccak = (state == S_DEC_START)  ||
+                                   (state == S_DEC_WAIT)   ||
+                                   (state == S_ENC_START)  ||
+                                   (state == S_ENC_WAIT)   ||
+                                   (state == S_ENC_SETTLE);
+
+    wire        shared_k_init       = core_owns_keccak ? core_k_init       : init_keccak;
+    wire [1:0]  shared_k_hash_type  = core_owns_keccak ? core_k_hash_type  : hash_type;
+    wire        shared_k_finalize   = core_owns_keccak ? core_k_finalize   : finalize_keccak;
+    wire [7:0]  shared_k_din        = core_owns_keccak ? core_k_din        : k_din;
+    wire        shared_k_din_valid  = core_owns_keccak ? core_k_din_valid  : k_din_valid;
+    wire        shared_k_dout_ready = core_owns_keccak ? core_k_dout_ready : fsm_k_dout_ready;
+    wire        shared_k_din_ready;
+    wire [7:0]  shared_k_dout;
+    wire        shared_k_dout_valid;
+
+    assign k_din_ready         = core_owns_keccak ? 1'b0 : shared_k_din_ready;
+    assign k_dout              = shared_k_dout;
+    assign k_dout_valid        = core_owns_keccak ? 1'b0 : shared_k_dout_valid;
+    assign core_k_din_ready    = core_owns_keccak ? shared_k_din_ready : 1'b0;
+    assign core_k_dout         = core_owns_keccak ? shared_k_dout : 8'd0;
+    assign core_k_dout_valid   = core_owns_keccak ? shared_k_dout_valid : 1'b0;
 
     reg [11:0] var_k;
     reg [7:0]  xor_acc;
@@ -180,65 +217,73 @@ module ml_kem_decaps (
         .READ_LATENCY(1)
     ) u_ct_prime_buf_ram (
         .clk    (clk),
-        .wr_en  (enc_ct_we && (enc_ct_addr < 11'd1088)),
-        .wr_addr(enc_ct_addr),
-        .wr_data(enc_ct_dout),
+        .wr_en  (core_ct_we && (core_ct_addr < 11'd1088)),
+        .wr_addr(core_ct_addr),
+        .wr_data(core_ct_dout),
         .rd_en  (ct_prime_rd_en),
         .rd_addr(ct_prime_rd_addr),
         .rd_data(ct_prime_rd_data)
     );
 
-    keccak_sponge_top u_keccak (
-        .clk(clk),
-        .rst_n(rst_n),
-        .init(init_keccak),
-        .hash_type(hash_type),
-        .finalize(finalize_keccak),
-        .din(k_din),
-        .din_valid(k_din_valid),
-        .din_ready(k_din_ready),
-        .dout(k_dout),
-        .dout_valid(k_dout_valid),
-        .dout_ready(fsm_k_dout_ready)
-    );
+    generate
+        if (HAS_INTERNAL_KECCAK) begin : gen_int_keccak
+            keccak_sponge_top u_keccak (
+                .clk(clk),
+                .rst_n(rst_n),
+                .init(shared_k_init),
+                .hash_type(shared_k_hash_type),
+                .finalize(shared_k_finalize),
+                .din(shared_k_din),
+                .din_valid(shared_k_din_valid),
+                .din_ready(shared_k_din_ready),
+                .dout(shared_k_dout),
+                .dout_valid(shared_k_dout_valid),
+                .dout_ready(shared_k_dout_ready)
+            );
 
-    kpke_decrypt u_decrypt (
-        .clk(clk),
-        .rst_n(rst_n),
-        .start(dec_start),
-        .busy(dec_busy),
-        .done(dec_done),
-        .in_we(dec_in_we),
-        .in_sel(dec_in_sel),
-        .in_addr(dec_in_addr),
-        .in_wdata(dec_in_wdata),
-        .out_rd(1'b0),
-        .out_addr(5'd0),
-        .out_rdata(),
-        .out_valid(),
-        .msg_we(),
-        .msg_addr(),
-        .msg_dout(),
-        .m_out(dec_m_out)
-    );
+            assign ext_k_init       = 1'b0;
+            assign ext_k_hash_type  = 2'b00;
+            assign ext_k_finalize   = 1'b0;
+            assign ext_k_din        = 8'd0;
+            assign ext_k_din_valid  = 1'b0;
+            assign ext_k_dout_ready = 1'b0;
+        end else begin : gen_ext_keccak
+            assign ext_k_init        = shared_k_init;
+            assign ext_k_hash_type   = shared_k_hash_type;
+            assign ext_k_finalize    = shared_k_finalize;
+            assign ext_k_din         = shared_k_din;
+            assign ext_k_din_valid   = shared_k_din_valid;
+            assign shared_k_din_ready = ext_k_din_ready;
+            assign shared_k_dout      = ext_k_dout;
+            assign shared_k_dout_valid = ext_k_dout_valid;
+            assign ext_k_dout_ready  = shared_k_dout_ready;
+        end
+    endgenerate
 
-    kpke_encrypt u_encrypt (
+    kpke_core u_core (
         .clk(clk),
         .rst_n(rst_n),
-        .start(enc_start),
-        .busy(enc_busy),
-        .done(enc_done),
-        .in_we(enc_in_we),
-        .in_sel(enc_in_sel),
-        .in_addr(enc_in_addr),
-        .in_wdata(enc_in_wdata),
-        .out_rd(1'b0),
-        .out_addr(11'd0),
-        .out_rdata(),
-        .out_valid(),
-        .ct_we(enc_ct_we),
-        .ct_addr(enc_ct_addr),
-        .ct_dout(enc_ct_dout)
+        .start(core_start),
+        .mode(core_mode),
+        .busy(),
+        .done(core_done),
+        .in_we(core_in_we),
+        .in_sel(core_in_sel),
+        .in_addr(core_in_addr),
+        .in_wdata(core_in_wdata),
+        .m_out(core_m_out),
+        .ct_we(core_ct_we),
+        .ct_addr(core_ct_addr),
+        .ct_dout(core_ct_dout),
+        .k_init(core_k_init),
+        .k_hash_type(core_k_hash_type),
+        .k_finalize(core_k_finalize),
+        .k_din(core_k_din),
+        .k_din_valid(core_k_din_valid),
+        .k_din_ready(core_k_din_ready),
+        .k_dout(core_k_dout),
+        .k_dout_valid(core_k_dout_valid),
+        .k_dout_ready(core_k_dout_ready)
     );
 
     // Capture h/z slices from incoming decapsulation key stream.
@@ -270,17 +315,12 @@ module ml_kem_decaps (
             k_din_valid      <= 1'b0;
             fsm_k_dout_ready <= 1'b0;
 
-            dec_start        <= 1'b0;
-            dec_in_we        <= 1'b0;
-            dec_in_sel       <= 1'b0;
-            dec_in_addr      <= 11'd0;
-            dec_in_wdata     <= 8'd0;
-
-            enc_start        <= 1'b0;
-            enc_in_we        <= 1'b0;
-            enc_in_sel       <= 2'd0;
-            enc_in_addr      <= 11'd0;
-            enc_in_wdata     <= 8'd0;
+            core_start       <= 1'b0;
+            core_mode        <= 2'd0;
+            core_in_we       <= 1'b0;
+            core_in_sel      <= 2'd0;
+            core_in_addr     <= 11'd0;
+            core_in_wdata    <= 8'd0;
 
             dk_rd_en         <= 1'b0;
             dk_rd_addr       <= 11'd0;
@@ -306,10 +346,8 @@ module ml_kem_decaps (
             init_keccak      <= 1'b0;
             finalize_keccak  <= 1'b0;
             k_din_valid      <= 1'b0;
-            dec_start        <= 1'b0;
-            dec_in_we        <= 1'b0;
-            enc_start        <= 1'b0;
-            enc_in_we        <= 1'b0;
+            core_start       <= 1'b0;
+            core_in_we       <= 1'b0;
             dk_rd_en         <= 1'b0;
             ek_rd_en         <= 1'b0;
             ct_rd_en         <= 1'b0;
@@ -320,10 +358,10 @@ module ml_kem_decaps (
                 if (out_addr < 11'd32) out_rdata <= ss_buf[out_addr[4:0]];
                 else                    out_rdata <= 8'd0;
             end
-            if (enc_ct_we && (enc_ct_addr < 11'd1088) && (enc_ct_addr == 11'd1087)) begin
+            if (core_ct_we && (core_ct_addr < 11'd1088) && (core_ct_addr == 11'd1087)) begin
                 enc_ct_last_seen <= 1'b1;
             end
-            if (enc_ct_we && (enc_ct_addr < 11'd1088)) begin
+            if (core_ct_we && (core_ct_addr < 11'd1088)) begin
                 dbg_enc_ct_count <= dbg_enc_ct_count + 12'd1;
             end
 
@@ -332,6 +370,7 @@ module ml_kem_decaps (
                     busy <= 1'b0;
                     if (start) begin
                         busy    <= 1'b1;
+                        core_mode <= 2'd0;
                         var_k   <= 12'd0;
                         xor_acc <= 8'd0;
                         match_reg <= 1'b0;
@@ -361,6 +400,7 @@ module ml_kem_decaps (
                 end
 
                 S_DEC_PRELOAD_REQ: begin
+                    core_mode <= 2'd0;
                     if (var_k < 12'd1152) begin
                         dk_rd_en   <= 1'b1;
                         dk_rd_addr <= var_k[10:0];
@@ -380,15 +420,16 @@ module ml_kem_decaps (
                 end
 
                 S_DEC_PRELOAD_SEND: begin
-                    dec_in_we <= 1'b1;
+                    core_mode <= 2'd0;
+                    core_in_we <= 1'b1;
                     if (var_k < 12'd1152) begin
-                        dec_in_sel   <= 1'b0;
-                        dec_in_addr  <= var_k[10:0];
-                        dec_in_wdata <= dk_rd_data;
+                        core_in_sel   <= 2'd0;
+                        core_in_addr  <= var_k[10:0];
+                        core_in_wdata <= dk_rd_data;
                     end else begin
-                        dec_in_sel   <= 1'b1;
-                        dec_in_addr  <= var_k[10:0] - 11'd1152;
-                        dec_in_wdata <= ct_rd_data;
+                        core_in_sel   <= 2'd1;
+                        core_in_addr  <= var_k[10:0] - 11'd1152;
+                        core_in_wdata <= ct_rd_data;
                     end
 
                     if (var_k == 12'd2239) begin
@@ -401,19 +442,20 @@ module ml_kem_decaps (
                 end
 
                 S_DEC_START: begin
-                    dec_start <= 1'b1;
+                    core_mode  <= 2'd0;
+                    core_start <= 1'b1;
                     state <= S_DEC_WAIT;
                 end
 
                 S_DEC_WAIT: begin
-                    if (dec_done) begin
+                    if (core_done) begin
                         state <= S_CAPTURE_M;
                     end
                 end
 
                 S_CAPTURE_M: begin
                     for (i = 0; i < 32; i = i + 1) begin
-                        m_prime[i] <= dec_m_out[i*8 +: 8];
+                        m_prime[i] <= core_m_out[i*8 +: 8];
                     end
                     var_k <= 12'd0;
                     state <= S_HASH_G_INIT;
@@ -533,21 +575,22 @@ module ml_kem_decaps (
 
                 // Preload kpke_encrypt with ek || m' || r'
                 S_ENC_PRELOAD: begin
+                    core_mode <= 2'd1;
                     if (var_k < 12'd1184) begin
                         ek_rd_en   <= 1'b1;
                         ek_rd_addr <= var_k[10:0];
                         state      <= S_ENC_PRELOAD_EK_WAIT;
                     end else if (var_k < 12'd1216) begin
-                        enc_in_we    <= 1'b1;
-                        enc_in_sel   <= 2'd1;
-                        enc_in_addr  <= var_k[10:0] - 11'd1184;
-                        enc_in_wdata <= m_prime[var_k - 12'd1184];
+                        core_in_we    <= 1'b1;
+                        core_in_sel   <= 2'd1;
+                        core_in_addr  <= var_k[10:0] - 11'd1184;
+                        core_in_wdata <= m_prime[var_k - 12'd1184];
                         var_k        <= var_k + 12'd1;
                     end else if (var_k < 12'd1248) begin
-                        enc_in_we    <= 1'b1;
-                        enc_in_sel   <= 2'd2;
-                        enc_in_addr  <= var_k[10:0] - 11'd1216;
-                        enc_in_wdata <= r_prime[var_k - 12'd1216];
+                        core_in_we    <= 1'b1;
+                        core_in_sel   <= 2'd2;
+                        core_in_addr  <= var_k[10:0] - 11'd1216;
+                        core_in_wdata <= r_prime[var_k - 12'd1216];
                         if (var_k == 12'd1247) begin
                             var_k <= 12'd0;
                             state <= S_ENC_START;
@@ -565,22 +608,24 @@ module ml_kem_decaps (
                 end
 
                 S_ENC_PRELOAD_EK_SEND: begin
-                    enc_in_we    <= 1'b1;
-                    enc_in_sel   <= 2'd0;
-                    enc_in_addr  <= var_k[10:0];
-                    enc_in_wdata <= ek_rd_data;
+                    core_mode <= 2'd1;
+                    core_in_we    <= 1'b1;
+                    core_in_sel   <= 2'd0;
+                    core_in_addr  <= var_k[10:0];
+                    core_in_wdata <= ek_rd_data;
                     var_k        <= var_k + 12'd1;
                     state        <= S_ENC_PRELOAD;
                 end
 
                 S_ENC_START: begin
                     enc_ct_last_seen <= 1'b0;
-                    enc_start <= 1'b1;
+                    core_mode  <= 2'd1;
+                    core_start <= 1'b1;
                     state <= S_ENC_WAIT;
                 end
 
                 S_ENC_WAIT: begin
-                    if (enc_done) begin
+                    if (core_done) begin
                         var_k <= 12'd0;
                         if (enc_ct_last_seen) begin
                             state <= S_COMPARE_INIT;

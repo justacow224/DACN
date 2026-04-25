@@ -1,6 +1,8 @@
 `timescale 1ns / 1ps
 
-module ml_kem_encaps (
+module ml_kem_encaps #(
+    parameter HAS_INTERNAL_KECCAK = 1
+) (
     input  wire         clk,
     input  wire         rst_n,
     input  wire         start,
@@ -29,7 +31,18 @@ module ml_kem_encaps (
     output wire [7:0]   ct_dout,
 
     // Packed shared secret output
-    output reg  [255:0] ss_out
+    output reg  [255:0] ss_out,
+
+    // External keccak interface, used only when HAS_INTERNAL_KECCAK == 0.
+    output wire         ext_k_init,
+    output wire [1:0]   ext_k_hash_type,
+    output wire         ext_k_finalize,
+    output wire [7:0]   ext_k_din,
+    output wire         ext_k_din_valid,
+    input  wire         ext_k_din_ready,
+    input  wire [7:0]   ext_k_dout,
+    input  wire         ext_k_dout_valid,
+    output wire         ext_k_dout_ready
 );
 
     localparam [4:0] S_IDLE                 = 5'd0;
@@ -88,6 +101,35 @@ module ml_kem_encaps (
     wire        enc_ct_we;
     wire [10:0] enc_ct_addr;
     wire [7:0]  enc_ct_dout;
+    wire        enc_k_init;
+    wire [1:0]  enc_k_hash_type;
+    wire        enc_k_finalize;
+    wire [7:0]  enc_k_din;
+    wire        enc_k_din_valid;
+    wire        enc_k_din_ready;
+    wire [7:0]  enc_k_dout;
+    wire        enc_k_dout_valid;
+    wire        enc_k_dout_ready;
+
+    wire        enc_owns_keccak = (state == S_ENC_START) ||
+                                  (state == S_ENC_WAIT);
+
+    wire        shared_k_init       = enc_owns_keccak ? enc_k_init       : init_keccak;
+    wire [1:0]  shared_k_hash_type  = enc_owns_keccak ? enc_k_hash_type  : hash_type;
+    wire        shared_k_finalize   = enc_owns_keccak ? enc_k_finalize   : finalize_keccak;
+    wire [7:0]  shared_k_din        = enc_owns_keccak ? enc_k_din        : k_din;
+    wire        shared_k_din_valid  = enc_owns_keccak ? enc_k_din_valid  : k_din_valid;
+    wire        shared_k_dout_ready = enc_owns_keccak ? enc_k_dout_ready : fsm_k_dout_ready;
+    wire        shared_k_din_ready;
+    wire [7:0]  shared_k_dout;
+    wire        shared_k_dout_valid;
+
+    assign k_din_ready       = enc_owns_keccak ? 1'b0 : shared_k_din_ready;
+    assign k_dout            = shared_k_dout;
+    assign k_dout_valid      = enc_owns_keccak ? 1'b0 : shared_k_dout_valid;
+    assign enc_k_din_ready   = enc_owns_keccak ? shared_k_din_ready : 1'b0;
+    assign enc_k_dout        = enc_owns_keccak ? shared_k_dout : 8'd0;
+    assign enc_k_dout_valid  = enc_owns_keccak ? shared_k_dout_valid : 1'b0;
 
     reg [11:0] var_k;
     integer i;
@@ -124,21 +166,44 @@ module ml_kem_encaps (
         .rd_data(ct_rd_data)
     );
 
-    keccak_sponge_top u_keccak (
-        .clk(clk),
-        .rst_n(rst_n),
-        .init(init_keccak),
-        .hash_type(hash_type),
-        .finalize(finalize_keccak),
-        .din(k_din),
-        .din_valid(k_din_valid),
-        .din_ready(k_din_ready),
-        .dout(k_dout),
-        .dout_valid(k_dout_valid),
-        .dout_ready(fsm_k_dout_ready)
-    );
+    generate
+        if (HAS_INTERNAL_KECCAK) begin : gen_int_keccak
+            keccak_sponge_top u_keccak (
+                .clk(clk),
+                .rst_n(rst_n),
+                .init(shared_k_init),
+                .hash_type(shared_k_hash_type),
+                .finalize(shared_k_finalize),
+                .din(shared_k_din),
+                .din_valid(shared_k_din_valid),
+                .din_ready(shared_k_din_ready),
+                .dout(shared_k_dout),
+                .dout_valid(shared_k_dout_valid),
+                .dout_ready(shared_k_dout_ready)
+            );
 
-    kpke_encrypt u_encrypt (
+            assign ext_k_init       = 1'b0;
+            assign ext_k_hash_type  = 2'b00;
+            assign ext_k_finalize   = 1'b0;
+            assign ext_k_din        = 8'd0;
+            assign ext_k_din_valid  = 1'b0;
+            assign ext_k_dout_ready = 1'b0;
+        end else begin : gen_ext_keccak
+            assign ext_k_init         = shared_k_init;
+            assign ext_k_hash_type    = shared_k_hash_type;
+            assign ext_k_finalize     = shared_k_finalize;
+            assign ext_k_din          = shared_k_din;
+            assign ext_k_din_valid    = shared_k_din_valid;
+            assign shared_k_din_ready = ext_k_din_ready;
+            assign shared_k_dout      = ext_k_dout;
+            assign shared_k_dout_valid = ext_k_dout_valid;
+            assign ext_k_dout_ready   = shared_k_dout_ready;
+        end
+    endgenerate
+
+    kpke_encrypt #(
+        .HAS_INTERNAL_KECCAK(0)
+    ) u_encrypt (
         .clk(clk),
         .rst_n(rst_n),
         .start(enc_start),
@@ -154,7 +219,16 @@ module ml_kem_encaps (
         .out_valid(),
         .ct_we(enc_ct_we),
         .ct_addr(enc_ct_addr),
-        .ct_dout(enc_ct_dout)
+        .ct_dout(enc_ct_dout),
+        .ext_k_init(enc_k_init),
+        .ext_k_hash_type(enc_k_hash_type),
+        .ext_k_finalize(enc_k_finalize),
+        .ext_k_din(enc_k_din),
+        .ext_k_din_valid(enc_k_din_valid),
+        .ext_k_din_ready(enc_k_din_ready),
+        .ext_k_dout(enc_k_dout),
+        .ext_k_dout_valid(enc_k_dout_valid),
+        .ext_k_dout_ready(enc_k_dout_ready)
     );
 
     always @(posedge clk) begin

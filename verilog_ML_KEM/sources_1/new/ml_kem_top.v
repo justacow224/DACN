@@ -259,6 +259,85 @@ module ml_kem_top #
     wire       dec_done;
     wire [255:0] dec_ss_out;
 
+    wire        kg_k_init;
+    wire [1:0]  kg_k_hash_type;
+    wire        kg_k_finalize;
+    wire [7:0]  kg_k_din;
+    wire        kg_k_din_valid;
+    wire        kg_k_din_ready;
+    wire [7:0]  kg_k_dout;
+    wire        kg_k_dout_valid;
+    wire        kg_k_dout_ready;
+
+    wire        enc_k_init;
+    wire [1:0]  enc_k_hash_type;
+    wire        enc_k_finalize;
+    wire [7:0]  enc_k_din;
+    wire        enc_k_din_valid;
+    wire        enc_k_din_ready;
+    wire [7:0]  enc_k_dout;
+    wire        enc_k_dout_valid;
+    wire        enc_k_dout_ready;
+
+    wire        dec_k_init;
+    wire [1:0]  dec_k_hash_type;
+    wire        dec_k_finalize;
+    wire [7:0]  dec_k_din;
+    wire        dec_k_din_valid;
+    wire        dec_k_din_ready;
+    wire [7:0]  dec_k_dout;
+    wire        dec_k_dout_valid;
+    wire        dec_k_dout_ready;
+
+    wire [1:0]  k_owner = op_sel_latched;
+    wire        top_k_init       = (k_owner == OP_KEYGEN) ? kg_k_init :
+                                   (k_owner == OP_ENCAPS) ? enc_k_init :
+                                   (k_owner == OP_DECAPS) ? dec_k_init : 1'b0;
+    wire [1:0]  top_k_hash_type  = (k_owner == OP_KEYGEN) ? kg_k_hash_type :
+                                   (k_owner == OP_ENCAPS) ? enc_k_hash_type :
+                                   (k_owner == OP_DECAPS) ? dec_k_hash_type : 2'b00;
+    wire        top_k_finalize   = (k_owner == OP_KEYGEN) ? kg_k_finalize :
+                                   (k_owner == OP_ENCAPS) ? enc_k_finalize :
+                                   (k_owner == OP_DECAPS) ? dec_k_finalize : 1'b0;
+    wire [7:0]  top_k_din        = (k_owner == OP_KEYGEN) ? kg_k_din :
+                                   (k_owner == OP_ENCAPS) ? enc_k_din :
+                                   (k_owner == OP_DECAPS) ? dec_k_din : 8'd0;
+    wire        top_k_din_valid  = (k_owner == OP_KEYGEN) ? kg_k_din_valid :
+                                   (k_owner == OP_ENCAPS) ? enc_k_din_valid :
+                                   (k_owner == OP_DECAPS) ? dec_k_din_valid : 1'b0;
+    wire        top_k_dout_ready = (k_owner == OP_KEYGEN) ? kg_k_dout_ready :
+                                   (k_owner == OP_ENCAPS) ? enc_k_dout_ready :
+                                   (k_owner == OP_DECAPS) ? dec_k_dout_ready : 1'b0;
+    wire        top_k_din_ready;
+    wire [7:0]  top_k_dout;
+    wire        top_k_dout_valid;
+
+    keccak_sponge_top u_keccak (
+        .clk(clk),
+        .rst_n(rst_n),
+        .init(top_k_init),
+        .hash_type(top_k_hash_type),
+        .finalize(top_k_finalize),
+        .din(top_k_din),
+        .din_valid(top_k_din_valid),
+        .din_ready(top_k_din_ready),
+        .dout(top_k_dout),
+        .dout_valid(top_k_dout_valid),
+        .dout_ready(top_k_dout_ready)
+    );
+
+    assign kg_k_din_ready  = (k_owner == OP_KEYGEN) ? top_k_din_ready : 1'b0;
+    assign kg_k_dout       = (k_owner == OP_KEYGEN) ? top_k_dout : 8'd0;
+    assign kg_k_dout_valid = (k_owner == OP_KEYGEN) ? top_k_dout_valid : 1'b0;
+
+    assign enc_k_din_ready  = (k_owner == OP_ENCAPS) ? top_k_din_ready : 1'b0;
+    assign enc_k_dout       = (k_owner == OP_ENCAPS) ? top_k_dout : 8'd0;
+    assign enc_k_dout_valid = (k_owner == OP_ENCAPS) ? top_k_dout_valid : 1'b0;
+
+    assign dec_k_din_ready  = (k_owner == OP_DECAPS) ? top_k_din_ready : 1'b0;
+    assign dec_k_dout       = (k_owner == OP_DECAPS) ? top_k_dout : 8'd0;
+    assign dec_k_dout_valid = (k_owner == OP_DECAPS) ? top_k_dout_valid : 1'b0;
+
     integer i;
 
     // ========================================================================
@@ -426,7 +505,9 @@ module ml_kem_top #
 
     generate
         if (BYPASS_CRYPTO == 0) begin : g_crypto_real
-            ml_kem_keygen u_keygen (
+            ml_kem_keygen #(
+                .HAS_INTERNAL_KECCAK(0)
+            ) u_keygen (
                 .clk(clk),
                 .rst_n(rst_n),
                 .start(keygen_start),
@@ -438,10 +519,21 @@ module ml_kem_top #
                 .pk_dout(keygen_pk_dout),
                 .sk_we(keygen_sk_we),
                 .sk_addr(keygen_sk_addr),
-                .sk_dout(keygen_sk_dout)
+                .sk_dout(keygen_sk_dout),
+                .ext_k_init(kg_k_init),
+                .ext_k_hash_type(kg_k_hash_type),
+                .ext_k_finalize(kg_k_finalize),
+                .ext_k_din(kg_k_din),
+                .ext_k_din_valid(kg_k_din_valid),
+                .ext_k_din_ready(kg_k_din_ready),
+                .ext_k_dout(kg_k_dout),
+                .ext_k_dout_valid(kg_k_dout_valid),
+                .ext_k_dout_ready(kg_k_dout_ready)
             );
 
-            ml_kem_encaps u_encaps (
+            ml_kem_encaps #(
+                .HAS_INTERNAL_KECCAK(0)
+            ) u_encaps (
                 .clk(clk),
                 .rst_n(rst_n),
                 .start(enc_start),
@@ -459,10 +551,21 @@ module ml_kem_top #
                 .ct_we(enc_ct_we),
                 .ct_addr(enc_ct_addr),
                 .ct_dout(enc_ct_dout),
-                .ss_out(enc_ss_out)
+                .ss_out(enc_ss_out),
+                .ext_k_init(enc_k_init),
+                .ext_k_hash_type(enc_k_hash_type),
+                .ext_k_finalize(enc_k_finalize),
+                .ext_k_din(enc_k_din),
+                .ext_k_din_valid(enc_k_din_valid),
+                .ext_k_din_ready(enc_k_din_ready),
+                .ext_k_dout(enc_k_dout),
+                .ext_k_dout_valid(enc_k_dout_valid),
+                .ext_k_dout_ready(enc_k_dout_ready)
             );
 
-            ml_kem_decaps u_decaps (
+            ml_kem_decaps #(
+                .HAS_INTERNAL_KECCAK(0)
+            ) u_decaps (
                 .clk(clk),
                 .rst_n(rst_n),
                 .start(dec_start),
@@ -476,7 +579,16 @@ module ml_kem_top #
                 .out_addr(11'd0),
                 .out_rdata(),
                 .out_valid(),
-                .ss_out(dec_ss_out)
+                .ss_out(dec_ss_out),
+                .ext_k_init(dec_k_init),
+                .ext_k_hash_type(dec_k_hash_type),
+                .ext_k_finalize(dec_k_finalize),
+                .ext_k_din(dec_k_din),
+                .ext_k_din_valid(dec_k_din_valid),
+                .ext_k_din_ready(dec_k_din_ready),
+                .ext_k_dout(dec_k_dout),
+                .ext_k_dout_valid(dec_k_dout_valid),
+                .ext_k_dout_ready(dec_k_dout_ready)
             );
         end else begin : g_crypto_bypass
             assign keygen_done   = 1'b0;
@@ -495,6 +607,24 @@ module ml_kem_top #
             assign dec_busy      = 1'b0;
             assign dec_done      = 1'b0;
             assign dec_ss_out    = 256'd0;
+            assign kg_k_init       = 1'b0;
+            assign kg_k_hash_type  = 2'b00;
+            assign kg_k_finalize   = 1'b0;
+            assign kg_k_din        = 8'd0;
+            assign kg_k_din_valid  = 1'b0;
+            assign kg_k_dout_ready = 1'b0;
+            assign enc_k_init       = 1'b0;
+            assign enc_k_hash_type  = 2'b00;
+            assign enc_k_finalize   = 1'b0;
+            assign enc_k_din        = 8'd0;
+            assign enc_k_din_valid  = 1'b0;
+            assign enc_k_dout_ready = 1'b0;
+            assign dec_k_init       = 1'b0;
+            assign dec_k_hash_type  = 2'b00;
+            assign dec_k_finalize   = 1'b0;
+            assign dec_k_din        = 8'd0;
+            assign dec_k_din_valid  = 1'b0;
+            assign dec_k_dout_ready = 1'b0;
         end
     endgenerate
 

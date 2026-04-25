@@ -1,6 +1,8 @@
 `timescale 1ns / 1ps
 
-module kpke_encrypt (
+module kpke_encrypt #(
+    parameter HAS_INTERNAL_KECCAK = 1
+) (
     input  wire         clk,
     input  wire         rst_n,
     input  wire         start,
@@ -25,7 +27,18 @@ module kpke_encrypt (
     // Optional streaming ciphertext output
     output wire         ct_we,
     output wire [10:0]  ct_addr,
-    output wire [7:0]   ct_dout
+    output wire [7:0]   ct_dout,
+
+    // External keccak interface, used only when HAS_INTERNAL_KECCAK == 0.
+    output wire         ext_k_init,
+    output wire [1:0]   ext_k_hash_type,
+    output wire         ext_k_finalize,
+    output wire [7:0]   ext_k_din,
+    output wire         ext_k_din_valid,
+    input  wire         ext_k_din_ready,
+    input  wire [7:0]   ext_k_dout,
+    input  wire         ext_k_dout_valid,
+    output wire         ext_k_dout_ready
 );
 
     // =============================================================
@@ -370,19 +383,40 @@ module kpke_encrypt (
 
     wire k_dout_ready = (state == S_U_PARSE_WAIT) ? parse_k_dout_ready : fsm_k_dout_ready;
 
-    keccak_sponge_top u_keccak (
-        .clk(clk),
-        .rst_n(rst_n),
-        .init(init_keccak),
-        .hash_type(hash_type),
-        .finalize(finalize_keccak),
-        .din(k_din),
-        .din_valid(k_din_valid),
-        .din_ready(k_din_ready),
-        .dout(k_dout),
-        .dout_valid(k_dout_valid),
-        .dout_ready(k_dout_ready)
-    );
+    generate
+        if (HAS_INTERNAL_KECCAK) begin : gen_int_keccak
+            keccak_sponge_top u_keccak (
+                .clk(clk),
+                .rst_n(rst_n),
+                .init(init_keccak),
+                .hash_type(hash_type),
+                .finalize(finalize_keccak),
+                .din(k_din),
+                .din_valid(k_din_valid),
+                .din_ready(k_din_ready),
+                .dout(k_dout),
+                .dout_valid(k_dout_valid),
+                .dout_ready(k_dout_ready)
+            );
+
+            assign ext_k_init       = 1'b0;
+            assign ext_k_hash_type  = 2'b00;
+            assign ext_k_finalize   = 1'b0;
+            assign ext_k_din        = 8'd0;
+            assign ext_k_din_valid  = 1'b0;
+            assign ext_k_dout_ready = 1'b0;
+        end else begin : gen_ext_keccak
+            assign ext_k_init       = init_keccak;
+            assign ext_k_hash_type  = hash_type;
+            assign ext_k_finalize   = finalize_keccak;
+            assign ext_k_din        = k_din;
+            assign ext_k_din_valid  = k_din_valid;
+            assign k_din_ready      = ext_k_din_ready;
+            assign k_dout           = ext_k_dout;
+            assign k_dout_valid     = ext_k_dout_valid;
+            assign ext_k_dout_ready = k_dout_ready;
+        end
+    endgenerate
 
     // =============================================================
     // 3) poly_cbd_eta2_top
