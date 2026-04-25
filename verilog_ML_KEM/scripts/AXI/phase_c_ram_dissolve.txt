@@ -1,0 +1,30 @@
+WARNING: [Synth 8-7137] Register prf_buf_reg in module kpke_encrypt has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code 
+WARNING: [Synth 8-4767] Trying to implement RAM 'prf_buf_reg' in registers. Block RAM or DRAM implementation is not possible; see log for reasons.
+Reason is one or more of the following :
+	1: RAM is sensitive to asynchronous reset signal. this RTL style is not supported. 
+RAM "prf_buf_reg" dissolved into registers
+
+WARNING: [Synth 8-7137] Register r_buf_reg in module ml_kem_encaps has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code 
+WARNING: [Synth 8-4767] Trying to implement RAM 'ss_buf_reg' in registers. Block RAM or DRAM implementation is not possible; see log for reasons.
+Reason is one or more of the following :
+	1: RAM is sensitive to asynchronous reset signal. this RTL style is not supported. 
+RAM "ss_buf_reg" dissolved into registers
+
+RAM "ss_buf_reg" dissolved into registers
+WARNING: [Synth 8-4767] Trying to implement RAM 'h_buf_reg' in registers. Block RAM or DRAM implementation is not possible; see log for reasons.
+Reason is one or more of the following :
+	1: RAM is sensitive to asynchronous reset signal. this RTL style is not supported. 
+RAM "h_buf_reg" dissolved into registers
+
+RAM "h_buf_reg" dissolved into registers
+WARNING: [Synth 8-4767] Trying to implement RAM 'r_buf_reg' in registers. Block RAM or DRAM implementation is not possible; see log for reasons.
+Reason is one or more of the following :
+	1: RAM is sensitive to asynchronous reset signal. this RTL style is not supported. 
+RAM "r_buf_reg" dissolved into registers
+
+WARNING: [Synth 8-6014] Unused sequential element araddr_lat_reg was removed.  [D:/HCMUT/Year_4/252/CA/Source/DACN/verilog_ML_KEM/sources_1/new/ml_kem_axi_lite_slave.v:70]
+WARNING: [Synth 8-4767] Trying to implement RAM 'm_mem_reg' in registers. Block RAM or DRAM implementation is not possible; see log for reasons.
+Reason is one or more of the following :
+	1: RAM has multiple writes via different ports in same process. If RAM inferencing intended, write to one port per process. 
+	2: Unable to determine number of words or word size in RAM. 
+
