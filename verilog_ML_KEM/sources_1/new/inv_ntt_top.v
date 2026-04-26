@@ -167,9 +167,17 @@ module inv_ntt_top (
     wire        ram1_we    = (wr_stage == 3'd7) ? (wr_en & (wr_bank_a == 1'b1)) : wr_en;
     wire [15:0] ram1_dout;
 
-    // Synchronize control signals with 1-cycle RAM latency
-    reg       bank_a_d1;
-    reg [2:0] stage_d1;
+    // Synchronize control signals with 1-cycle RAM latency.
+    // dont_touch is required: Vivado synthesis (2025.1, default strategy)
+    // mis-classifies stage_d1_reg as "unused" and removes it (Synth 8-6014),
+    // collapsing the 1-cycle delay against `stage`. That causes the stage
+    // 6->7 (scaling) boundary to read stage-6 BRAM data with stage-7 mux
+    // controls, corrupting invNTT output to ~0. Behavioral sim passes because
+    // it sees the RTL register; the bitstream silently produces wrong c1+c2
+    // (encaps ct mismatch against KAT, ss=K still matches). See on-board
+    // KAT_768 vec #0 failure debug session 2026-04.
+    (* dont_touch = "true" *) reg       bank_a_d1;
+    (* dont_touch = "true" *) reg [2:0] stage_d1;
     always @(posedge clk) begin
         if (!rst_n) begin
             bank_a_d1 <= 1'b0;

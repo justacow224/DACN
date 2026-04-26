@@ -8,6 +8,15 @@ module tb_ml_kem_top;
     localparam int C_M_AXI_DATA_WIDTH = 32;
     localparam int TB_BYPASS_CRYPTO   = 0;
 
+    // Path to the per-field KAT vec #0 .mem files produced by
+    // verilog_ML_KEM/scripts/extract_kat0.py from KAT_768.txt.
+    // Edit if the project lives elsewhere, or override at sim time:
+    //   xsim -testplusarg KAT0_DIR=<path>  (then add $value$plusargs to the
+    //   $readmemh calls below).
+`ifndef KAT0_DIR
+    `define KAT0_DIR "D:/HCMUT/Year_4/252/CA/Source/DACN/verilog_ML_KEM/sim_1/new/kat0"
+`endif
+
     localparam int PK_BASE = 32'h0000_1000;
     localparam int SK_BASE = 32'h0000_2000;
     localparam int CT_BASE = 32'h0000_3000;
@@ -84,6 +93,20 @@ module tb_ml_kem_top;
     integer dbg_pk_vs_sk_pk;
     integer dbg_h_keygen_vs_encaps;
     integer dbg_h_keygen_vs_sk;
+
+    // KAT vec #0 reference data (loaded from .mem files in initial block).
+    reg [7:0] kat_d  [0:31];
+    reg [7:0] kat_z  [0:31];
+    reg [7:0] kat_m  [0:31];
+    reg [7:0] kat_pk [0:1183];
+    reg [7:0] kat_sk [0:2399];
+    reg [7:0] kat_ct [0:1087];
+    reg [7:0] kat_ss [0:31];
+    integer dbg_kat_pk_diff;
+    integer dbg_kat_sk_diff;
+    integer dbg_kat_ct_diff;
+    integer dbg_kat_ss_diff;
+    integer first_diff_pk, first_diff_sk, first_diff_ct, first_diff_ss;
 
     ml_kem_top #(
         .C_S_AXI_ADDR_WIDTH(C_S_AXI_ADDR_WIDTH),
@@ -581,6 +604,16 @@ module tb_ml_kem_top;
 
         for (i = 0; i < 65536; i = i + 1) ddr_mem[i] = 8'd0;
 
+        // Load KAT vec #0 reference data. Always load — Gate A doesn't use
+        // them but $readmemh is harmless when arrays are unused.
+        $readmemh({`KAT0_DIR, "/d.mem"},  kat_d);
+        $readmemh({`KAT0_DIR, "/z.mem"},  kat_z);
+        $readmemh({`KAT0_DIR, "/m.mem"},  kat_m);
+        $readmemh({`KAT0_DIR, "/pk.mem"}, kat_pk);
+        $readmemh({`KAT0_DIR, "/sk.mem"}, kat_sk);
+        $readmemh({`KAT0_DIR, "/ct.mem"}, kat_ct);
+        $readmemh({`KAT0_DIR, "/ss.mem"}, kat_ss);
+
         repeat (10) @(posedge clk);
         rst_n = 1'b1;
         repeat (5) @(posedge clk);
@@ -691,15 +724,23 @@ module tb_ml_kem_top;
             wait_done();
             expect_status(1'b1, 1'b1, 1'b0);
         end else begin
-            // Gate B - Real integrated smoke.
+            // Gate B - Real KAT regression against NIST KAT_768 vec #0.
+            //
+            // This branch was previously a smoke test (random seeds + check
+            // ss_dec == ss_enc only). That masked an encaps RTL bug because
+            // the same wrong math is applied in encaps and decaps's re-encrypt
+            // path, so round-trip ss matched even when ct was non-conformant.
+            // Now we feed the KAT vec #0 inputs (d, z, m) and verify pk, sk,
+            // ct, ss byte-for-byte against the KAT expected values, the same
+            // check the on-board PYNQ driver does.
             axi_read32(8'h00, rd);
             if (rd !== 32'h0000_0000) $fatal(1, "CTRL reset mismatch (Gate B): 0x%08h", rd);
             expect_status(1'b0, 1'b1, 1'b0);
 
-            // Program seeds for KeyGen.
+            // Program seed_d and seed_z from KAT vec #0 (8 x 32-bit LE words each).
             for (i = 0; i < 8; i = i + 1) begin
-                axi_write32(8'h10 + i*4, 32'h1234_0000 + i);
-                axi_write32(8'h30 + i*4, 32'hABCD_0000 + i);
+                axi_write32(8'h10 + i*4, {kat_d[i*4+3], kat_d[i*4+2], kat_d[i*4+1], kat_d[i*4+0]});
+                axi_write32(8'h30 + i*4, {kat_z[i*4+3], kat_z[i*4+2], kat_z[i*4+1], kat_z[i*4+0]});
             end
 
             // Program DDR base pointers.
@@ -709,9 +750,9 @@ module tb_ml_kem_top;
             axi_write32(8'h5C, SS_BASE);
             axi_write32(8'h60, M_BASE);
 
-            // Prepare m for Encaps.
+            // Prepare m for Encaps from KAT vec #0.
             for (i = 0; i < 32; i = i + 1) begin
-                ddr_mem[M_BASE + i] = (i * 3 + 8'h21);
+                ddr_mem[M_BASE + i] = kat_m[i];
             end
 
             // KeyGen
@@ -722,24 +763,107 @@ module tb_ml_kem_top;
             axi_read32(8'h08, rd);
             if (rd == 32'd0) $fatal(1, "Gate B KeyGen cycles should be non-zero");
 
+            // Verify pk + sk against KAT.
+            dbg_kat_pk_diff = 0;
+            dbg_kat_sk_diff = 0;
+            first_diff_pk = -1;
+            first_diff_sk = -1;
+            for (i = 0; i < 1184; i = i + 1) begin
+                if (ddr_mem[PK_BASE + i] !== kat_pk[i]) begin
+                    dbg_kat_pk_diff = dbg_kat_pk_diff + 1;
+                    if (first_diff_pk == -1) first_diff_pk = i;
+                end
+            end
+            for (i = 0; i < 2400; i = i + 1) begin
+                if (ddr_mem[SK_BASE + i] !== kat_sk[i]) begin
+                    dbg_kat_sk_diff = dbg_kat_sk_diff + 1;
+                    if (first_diff_sk == -1) first_diff_sk = i;
+                end
+            end
+            if (dbg_kat_pk_diff != 0) begin
+                $display("KAT KeyGen pk: %0d byte mismatches, first @ %0d (got=%02x exp=%02x)",
+                         dbg_kat_pk_diff, first_diff_pk,
+                         ddr_mem[PK_BASE + first_diff_pk], kat_pk[first_diff_pk]);
+                $fatal(1, "Gate B KAT KeyGen pk mismatch");
+            end
+            if (dbg_kat_sk_diff != 0) begin
+                $display("KAT KeyGen sk: %0d byte mismatches, first @ %0d (got=%02x exp=%02x)",
+                         dbg_kat_sk_diff, first_diff_sk,
+                         ddr_mem[SK_BASE + first_diff_sk], kat_sk[first_diff_sk]);
+                $fatal(1, "Gate B KAT KeyGen sk mismatch");
+            end
+            $display("Gate B KAT KeyGen: pk + sk match (vec #0)");
+
             // Encaps
             axi_write32(8'h00, 32'h0000_0003);
             expect_ctrl(2'd1);
             wait_done_limit(300000);
             expect_status(1'b1, 1'b1, 1'b0);
+
+            // Verify ct + ss against KAT.
+            dbg_kat_ct_diff = 0;
+            dbg_kat_ss_diff = 0;
+            first_diff_ct = -1;
+            first_diff_ss = -1;
+            for (i = 0; i < 1088; i = i + 1) begin
+                if (ddr_mem[CT_BASE + i] !== kat_ct[i]) begin
+                    dbg_kat_ct_diff = dbg_kat_ct_diff + 1;
+                    if (first_diff_ct == -1) first_diff_ct = i;
+                end
+            end
             for (i = 0; i < 32; i = i + 1) begin
                 ss_enc[i] = ddr_mem[SS_BASE + i];
+                if (ss_enc[i] !== kat_ss[i]) begin
+                    dbg_kat_ss_diff = dbg_kat_ss_diff + 1;
+                    if (first_diff_ss == -1) first_diff_ss = i;
+                end
             end
+            if (dbg_kat_ct_diff != 0) begin
+                $display("KAT Encaps ct: %0d byte mismatches, first @ %0d (got=%02x exp=%02x) %s",
+                         dbg_kat_ct_diff, first_diff_ct,
+                         ddr_mem[CT_BASE + first_diff_ct], kat_ct[first_diff_ct],
+                         (first_diff_ct < 960) ? "[c1=Compress_10(u) region]"
+                                               : "[c2=Compress_4(v) region]");
+                $display("  ct[0..15]   got: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                         ddr_mem[CT_BASE+0],  ddr_mem[CT_BASE+1],  ddr_mem[CT_BASE+2],  ddr_mem[CT_BASE+3],
+                         ddr_mem[CT_BASE+4],  ddr_mem[CT_BASE+5],  ddr_mem[CT_BASE+6],  ddr_mem[CT_BASE+7],
+                         ddr_mem[CT_BASE+8],  ddr_mem[CT_BASE+9],  ddr_mem[CT_BASE+10], ddr_mem[CT_BASE+11],
+                         ddr_mem[CT_BASE+12], ddr_mem[CT_BASE+13], ddr_mem[CT_BASE+14], ddr_mem[CT_BASE+15]);
+                $display("  ct[0..15]   exp: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                         kat_ct[0],  kat_ct[1],  kat_ct[2],  kat_ct[3],
+                         kat_ct[4],  kat_ct[5],  kat_ct[6],  kat_ct[7],
+                         kat_ct[8],  kat_ct[9],  kat_ct[10], kat_ct[11],
+                         kat_ct[12], kat_ct[13], kat_ct[14], kat_ct[15]);
+                $display("  ct[960..975] got: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x   (c2 head)",
+                         ddr_mem[CT_BASE+960],  ddr_mem[CT_BASE+961],  ddr_mem[CT_BASE+962],  ddr_mem[CT_BASE+963],
+                         ddr_mem[CT_BASE+964],  ddr_mem[CT_BASE+965],  ddr_mem[CT_BASE+966],  ddr_mem[CT_BASE+967],
+                         ddr_mem[CT_BASE+968],  ddr_mem[CT_BASE+969],  ddr_mem[CT_BASE+970],  ddr_mem[CT_BASE+971],
+                         ddr_mem[CT_BASE+972],  ddr_mem[CT_BASE+973],  ddr_mem[CT_BASE+974],  ddr_mem[CT_BASE+975]);
+                $display("  ct[960..975] exp: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                         kat_ct[960],  kat_ct[961],  kat_ct[962],  kat_ct[963],
+                         kat_ct[964],  kat_ct[965],  kat_ct[966],  kat_ct[967],
+                         kat_ct[968],  kat_ct[969],  kat_ct[970],  kat_ct[971],
+                         kat_ct[972],  kat_ct[973],  kat_ct[974],  kat_ct[975]);
+                $fatal(1, "Gate B KAT Encaps ct mismatch");
+            end
+            if (dbg_kat_ss_diff != 0) begin
+                $display("KAT Encaps ss: %0d byte mismatches, first @ %0d (got=%02x exp=%02x)",
+                         dbg_kat_ss_diff, first_diff_ss,
+                         ss_enc[first_diff_ss], kat_ss[first_diff_ss]);
+                $fatal(1, "Gate B KAT Encaps ss mismatch");
+            end
+            $display("Gate B KAT Encaps: ct + ss match (vec #0)");
 
-            // Decaps (smoke path: no AXI-MM stall to isolate functional correctness first)
+            // Decaps — fed our just-produced ct (which equals KAT ct since it
+            // matched). Should yield ss = K = KAT ss (match branch, no reject).
             axi_write32(8'h00, 32'h0000_0005);
             expect_ctrl(2'd2);
             wait_done_limit(500000);
             expect_status(1'b1, 1'b1, 1'b0);
-            rd = 32'd0; // reuse as mismatch counter
+            rd = 32'd0;
             for (i = 0; i < 32; i = i + 1) begin
                 ss_dec[i] = ddr_mem[SS_BASE + i];
-                if (ss_dec[i] !== ss_enc[i]) begin
+                if (ss_dec[i] !== kat_ss[i]) begin
                     rd = rd + 32'd1;
                 end
             end
@@ -810,8 +934,9 @@ module tb_ml_kem_top;
                          ddr_mem[M_BASE + 0], probe_dec_m_out);
                 $display("DBG GateB key consistency: pk_vs_skpk=%0d keygen_h_vs_encaps_h=%0d keygen_h_vs_sk_h=%0d",
                          dbg_pk_vs_sk_pk, dbg_h_keygen_vs_encaps, dbg_h_keygen_vs_sk);
-                $fatal(1, "Gate B ss mismatch count=%0d", rd);
+                $fatal(1, "Gate B KAT Decaps ss mismatch count=%0d (vs KAT vec #0)", rd);
             end
+            $display("Gate B KAT Decaps: ss match (vec #0)");
         end
 
         $display("tb_ml_kem_top: PASS");
