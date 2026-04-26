@@ -118,6 +118,7 @@ module poly_compress (
     //=========================================================================
     // FSM
     //=========================================================================
+    integer i_pc_rst;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state      <= S_IDLE;
@@ -135,6 +136,17 @@ module poly_compress (
             bit_pos    <= 3'd0;
             u10_cnt    <= 2'd0;
             wr10_cnt   <= 3'd0;
+            // Explicit reset of array buffers — same fix pattern as
+            // ml_kem_encaps.v / kpke_encrypt.v. Without this, [Synth 8-7137]
+            // flags set/reset same priority on u10_buf/packed_bytes and on
+            // KR260 those buffers get unpredictable on-silicon resolution,
+            // corrupting c1 byte packing.
+            for (i_pc_rst = 0; i_pc_rst < 4; i_pc_rst = i_pc_rst + 1) begin
+                u10_buf[i_pc_rst] <= 10'd0;
+            end
+            for (i_pc_rst = 0; i_pc_rst < 5; i_pc_rst = i_pc_rst + 1) begin
+                packed_bytes[i_pc_rst] <= 8'd0;
+            end
         end else begin
             // Default: deassert write enable
             byte_we <= 1'b0;

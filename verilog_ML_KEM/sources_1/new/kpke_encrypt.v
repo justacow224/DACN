@@ -864,20 +864,37 @@ module kpke_encrypt #(
         end
     end
 
+    // Refactored tmp_mem write logic — split into clean, BRAM-friendly form.
+    // ORIGINAL had cascaded if-else chain with mixed write paths. On KR260
+    // this resulted in invNTT writes not persisting in tmp_mem (forensic
+    // probes showed tmp_mem still containing CBD r data when U_ADDE1 read).
+    // The refactor below makes write_enable / write_addr / write_data
+    // combinational MUXes feeding a single per-port write, which is the
+    // canonical Xilinx BRAM/LUTRAM inference template.
+
+    wire        tmp_we_dual = cbd_ram_we && (noise_stage == 2'd0);
+    wire        tmp_we_pw   = ((state == S_U_PW_READ_CAP) && (u_j != 2'd0)) ||
+                              ((state == S_V_PW_READ_CAP) && (v_i != 2'd0));
+    wire        tmp_we_intt = (state == S_U_INTT_READ_CAP) || (state == S_V_INTT_READ_CAP);
+    wire        tmp_we_any  = tmp_we_dual || tmp_we_pw || tmp_we_intt;
+
+    wire [7:0]  tmp_waddr_a = tmp_we_dual ? {cbd_ram_addr, 1'b0} : coeff_idx;
+    wire [15:0] tmp_wdata_a = tmp_we_dual ? cbd_ram_a0_din :
+                              tmp_we_intt ? intt_host_dout :
+                                            pw_host_dout;
+    wire [7:0]  tmp_waddr_b = {cbd_ram_addr, 1'b1};
+    wire [15:0] tmp_wdata_b = cbd_ram_a1_din;
+
     always @(posedge clk) begin
         if (!rst_n) begin
             tmp_rdata <= 16'd0;
         end else begin
             tmp_rdata <= tmp_mem[tmp_raddr];
-            if (cbd_ram_we && (noise_stage == 2'd0)) begin
-                tmp_mem[{cbd_ram_addr, 1'b0}] <= cbd_ram_a0_din;
-                tmp_mem[{cbd_ram_addr, 1'b1}] <= cbd_ram_a1_din;
-            end else if ((state == S_U_PW_READ_CAP) && (u_j != 2'd0)) begin
-                tmp_mem[coeff_idx] <= pw_host_dout;
-            end else if ((state == S_V_PW_READ_CAP) && (v_i != 2'd0)) begin
-                tmp_mem[coeff_idx] <= pw_host_dout;
-            end else if ((state == S_U_INTT_READ_CAP) || (state == S_V_INTT_READ_CAP)) begin
-                tmp_mem[coeff_idx] <= intt_host_dout;
+            if (tmp_we_any) begin
+                tmp_mem[tmp_waddr_a] <= tmp_wdata_a;
+            end
+            if (tmp_we_dual) begin
+                tmp_mem[tmp_waddr_b] <= tmp_wdata_b;
             end
         end
     end
@@ -998,6 +1015,12 @@ module kpke_encrypt #(
                         comp_base_offset <= 11'd0;
                         comp_d_sel_reg   <= 2'b10;
                         comp_mode_v      <= 1'b0;
+                        // Soft-clear PRF output buffer on each start so noise_stage=0
+                        // (r polynomial) reads fresh CBD output, not residue from a
+                        // prior encrypt call.
+                        for (i_rst_buf = 0; i_rst_buf < 16; i_rst_buf = i_rst_buf + 1) begin
+                            prf_buf[i_rst_buf] <= 64'd0;
+                        end
                         state            <= S_DECODE_EK_START;
                     end
                 end

@@ -575,6 +575,7 @@ module ml_kem_keygen #(
     // =================================================================
     // Main Control FSM
     // =================================================================
+    integer i_clr_buf;
     always @(posedge clk) begin
         if (!rst_n) begin
             state           <= S_IDLE;
@@ -625,6 +626,26 @@ module ml_kem_keygen #(
                 S_IDLE: begin
                     done <= 0;
                     if (start) begin
+                        // Soft-clear internal buffers on every start. Without this,
+                        // residual data from a previous keygen call leaks into the
+                        // current run when seeds change. Symptom: keygen replays the
+                        // first call's pk for any subsequent call until rst_n pulses
+                        // (verified on KR260 — overlay reload fixes; back-to-back
+                        // keygen with different seeds reproduces).
+                        for (i_clr_buf = 0; i_clr_buf < 32; i_clr_buf = i_clr_buf + 1) begin
+                            rho_reg[i_clr_buf]   <= 8'd0;
+                            sigma_reg[i_clr_buf] <= 8'd0;
+                            h_pk_reg[i_clr_buf]  <= 8'd0;
+                        end
+                        for (i_clr_buf = 0; i_clr_buf < 16; i_clr_buf = i_clr_buf + 1) begin
+                            prf_buf[i_clr_buf] <= 64'd0;
+                        end
+                        prf_word_idx <= 4'd0;
+                        prf_byte_idx <= 3'd0;
+                        prf_shift    <= 64'd0;
+                        i_idx        <= 3'd0;
+                        j_idx        <= 3'd0;
+
                         launch_keccak(2'b11, S_HASH_G); // SHA3-512
                     end
                 end
@@ -1022,7 +1043,8 @@ module ml_kem_keygen #(
                 end
 
                 S_DONE: begin
-                    done <= 1;
+                    done  <= 1;
+                    state <= S_IDLE;  // return to IDLE so the next start can re-trigger
                 end
 
                 default: state <= S_IDLE;

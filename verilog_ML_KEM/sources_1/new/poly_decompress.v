@@ -104,6 +104,7 @@ module poly_decompress (
     //=========================================================================
     // FSM
     //=========================================================================
+    integer i_pd_rst;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state        <= S_IDLE;
@@ -121,6 +122,16 @@ module poly_decompress (
             d1_bit_idx   <= 3'd0;
             d10_byte_cnt <= 3'd0;
             d10_val_idx  <= 2'd0;
+            d1_byte      <= 8'd0;
+            // Same fix pattern: explicit reset of array buffers to remove
+            // [Synth 8-7137] set/reset same priority warning. 18 warnings
+            // in this module.
+            for (i_pd_rst = 0; i_pd_rst < 5; i_pd_rst = i_pd_rst + 1) begin
+                d10_bytes[i_pd_rst] <= 8'd0;
+            end
+            for (i_pd_rst = 0; i_pd_rst < 4; i_pd_rst = i_pd_rst + 1) begin
+                d10_vals[i_pd_rst] <= 10'd0;
+            end
         end else begin
             coeff_we <= 1'b0;
 

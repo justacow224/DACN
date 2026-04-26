@@ -24,12 +24,9 @@ set_property top ml_kem_bd_wrapper [current_fileset]
 update_compile_order -fileset sources_1
 puts "INFO: top fileset: [get_property top [current_fileset]]"
 
-# Reset synth strategy to default (in case conservative options were left over)
-set_property STRATEGY "Vivado Synthesis Defaults" [get_runs synth_1]
-set_property -name {STEPS.SYNTH_DESIGN.ARGS.FLATTEN_HIERARCHY} -value {rebuilt} -objects [get_runs synth_1]
-set_property -name {STEPS.SYNTH_DESIGN.ARGS.NO_LC}            -value {false} -objects [get_runs synth_1]
-set_property -name {STEPS.SYNTH_DESIGN.ARGS.RETIMING}         -value {false} -objects [get_runs synth_1]
-set_property -name {STEPS.SYNTH_DESIGN.ARGS.RESOURCE_SHARING} -value {auto}  -objects [get_runs synth_1]
+# Area-optimized synth strategy (LUT minimization). WNS budget is generous
+# (~2-3 ns at 100 MHz), so we trade timing slack for fewer LUTs.
+set_property STRATEGY "Flow_AreaOptimized_high" [get_runs synth_1]
 
 # Force re-synth (RTL changed)
 reset_run synth_1

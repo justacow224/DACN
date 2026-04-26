@@ -259,6 +259,7 @@ module ml_kem_top #
     wire       dec_done;
     wire [255:0] dec_ss_out;
 
+
     wire        kg_k_init;
     wire [1:0]  kg_k_hash_type;
     wire        kg_k_finalize;

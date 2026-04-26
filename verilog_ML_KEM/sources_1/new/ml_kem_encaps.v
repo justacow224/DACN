@@ -333,6 +333,14 @@ module ml_kem_encaps #(
                         var_k <= 12'd0;
                         ct_rd_pending    <= 1'b0;
                         ct_rd_pending_d1 <= 1'b0;
+                        // Soft-clear buffer arrays on every start. Without this,
+                        // residual data persists between operations and causes
+                        // subsequent calls to misbehave (verified on KR260).
+                        for (i_rst_buf = 0; i_rst_buf < 32; i_rst_buf = i_rst_buf + 1) begin
+                            h_buf[i_rst_buf]  <= 8'd0;
+                            ss_buf[i_rst_buf] <= 8'd0;
+                            r_buf[i_rst_buf]  <= 8'd0;
+                        end
                         state <= S_HASH_H_INIT;
                     end
                 end
