@@ -6,7 +6,7 @@ module tb_ml_kem_top;
     localparam int C_S_AXI_DATA_WIDTH = 32;
     localparam int C_M_AXI_ADDR_WIDTH = 32;
     localparam int C_M_AXI_DATA_WIDTH = 32;
-    localparam int TB_BYPASS_CRYPTO   = 0;
+    localparam int TB_BYPASS_CRYPTO   = 0; // Set to 1 to bypass crypto and just test AXI infra and sequencing.
 
     // Path to the per-field KAT vec #0 .mem files produced by
     // verilog_ML_KEM/scripts/extract_kat0.py from KAT_768.txt.

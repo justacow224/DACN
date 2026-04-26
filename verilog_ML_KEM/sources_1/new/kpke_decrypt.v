@@ -527,14 +527,16 @@ module kpke_decrypt (
         end
     end
 
+    // Canonical Xilinx single-port BRAM inference pattern (no reset on output reg).
+    // Fixes Synth 8-4767 dissolve observed when async reset is present on tmp_rdata.
+    wire        tmp_we    = (state == S_PW_READ_CAP) && (pw_idx != 2'd0);
+    wire [7:0]  tmp_waddr = coeff_idx;
+    wire [15:0] tmp_wdata = pw_host_dout;
+
     always @(posedge clk) begin
-        if (!rst_n) begin
-            tmp_rdata <= 16'd0;
-        end else begin
-            tmp_rdata <= tmp_mem[tmp_raddr];
-            if ((state == S_PW_READ_CAP) && (pw_idx != 2'd0)) begin
-                tmp_mem[coeff_idx] <= pw_host_dout;
-            end
+        tmp_rdata <= tmp_mem[tmp_raddr];
+        if (tmp_we) begin
+            tmp_mem[tmp_waddr] <= tmp_wdata;
         end
     end
 
