@@ -1,12 +1,16 @@
 `timescale 1ns / 1ps
 
+`ifndef TB_BYPASS_CRYPTO
+    `define TB_BYPASS_CRYPTO 0
+`endif
+
 module tb_ml_kem_top;
 
     localparam int C_S_AXI_ADDR_WIDTH = 8;
     localparam int C_S_AXI_DATA_WIDTH = 32;
     localparam int C_M_AXI_ADDR_WIDTH = 32;
     localparam int C_M_AXI_DATA_WIDTH = 32;
-    localparam int TB_BYPASS_CRYPTO   = 0; // Set to 1 to bypass crypto and just test AXI infra and sequencing.
+    localparam int TB_BYPASS_CRYPTO   = `TB_BYPASS_CRYPTO; // 1 bypasses crypto and tests AXI infra/sequencing.
 
     // Path to the per-field KAT vec #0 .mem files produced by
     // verilog_ML_KEM/scripts/extract_kat0.py from KAT_768.txt.
@@ -723,6 +727,8 @@ module tb_ml_kem_top;
             axi_write32(8'h00, 32'h0000_0005);
             wait_done();
             expect_status(1'b1, 1'b1, 1'b0);
+
+            $display("Gate A AXI infra: PASS");
         end else begin
             // Gate B - Real KAT regression against NIST KAT_768 vec #0.
             //
