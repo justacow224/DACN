@@ -1,7 +1,8 @@
 `timescale 1ns / 1ps
 
 module ml_kem_encaps #(
-    parameter HAS_INTERNAL_KECCAK = 1
+    parameter HAS_INTERNAL_KECCAK  = 1,
+    parameter HAS_INTERNAL_ENCRYPT = 1
 ) (
     input  wire         clk,
     input  wire         rst_n,
@@ -42,7 +43,23 @@ module ml_kem_encaps #(
     input  wire         ext_k_din_ready,
     input  wire [7:0]   ext_k_dout,
     input  wire         ext_k_dout_valid,
-    output wire         ext_k_dout_ready
+    output wire         ext_k_dout_ready,
+
+    // External kpke_encrypt interface (used only when HAS_INTERNAL_ENCRYPT == 0).
+    // Forward signals: this module drives a shared kpke_encrypt instance hosted
+    // at a parent module via these outputs.
+    output wire         ext_enc_start,
+    output wire         ext_enc_in_we,
+    output wire [1:0]   ext_enc_in_sel,
+    output wire [10:0]  ext_enc_in_addr,
+    output wire [7:0]   ext_enc_in_wdata,
+    // Backward signals: this module reads shared kpke_encrypt status via these
+    // inputs.
+    input  wire         ext_enc_busy,
+    input  wire         ext_enc_done,
+    input  wire         ext_enc_ct_we,
+    input  wire [10:0]  ext_enc_ct_addr,
+    input  wire [7:0]   ext_enc_ct_dout
 );
 
     localparam [4:0] S_IDLE                 = 5'd0;
@@ -111,8 +128,13 @@ module ml_kem_encaps #(
     wire        enc_k_dout_valid;
     wire        enc_k_dout_ready;
 
-    wire        enc_owns_keccak = (state == S_ENC_START) ||
-                                  (state == S_ENC_WAIT);
+    // When HAS_INTERNAL_ENCRYPT == 0, no local kpke_encrypt instance owns the
+    // shared keccak — the lifted instance drives keccak directly via its own
+    // ext_k_* path at the top level, so encaps's local MUX collapses to the
+    // top-FSM (G/H hashing) source only.
+    wire        enc_owns_keccak = (HAS_INTERNAL_ENCRYPT != 0) &&
+                                  ((state == S_ENC_START) ||
+                                   (state == S_ENC_WAIT));
 
     wire        shared_k_init       = enc_owns_keccak ? enc_k_init       : init_keccak;
     wire [1:0]  shared_k_hash_type  = enc_owns_keccak ? enc_k_hash_type  : hash_type;
@@ -201,35 +223,69 @@ module ml_kem_encaps #(
         end
     endgenerate
 
-    kpke_encrypt #(
-        .HAS_INTERNAL_KECCAK(0)
-    ) u_encrypt (
-        .clk(clk),
-        .rst_n(rst_n),
-        .start(enc_start),
-        .busy(enc_busy),
-        .done(enc_done),
-        .in_we(enc_in_we),
-        .in_sel(enc_in_sel),
-        .in_addr(enc_in_addr),
-        .in_wdata(enc_in_wdata),
-        .out_rd(1'b0),
-        .out_addr(11'd0),
-        .out_rdata(),
-        .out_valid(),
-        .ct_we(enc_ct_we),
-        .ct_addr(enc_ct_addr),
-        .ct_dout(enc_ct_dout),
-        .ext_k_init(enc_k_init),
-        .ext_k_hash_type(enc_k_hash_type),
-        .ext_k_finalize(enc_k_finalize),
-        .ext_k_din(enc_k_din),
-        .ext_k_din_valid(enc_k_din_valid),
-        .ext_k_din_ready(enc_k_din_ready),
-        .ext_k_dout(enc_k_dout),
-        .ext_k_dout_valid(enc_k_dout_valid),
-        .ext_k_dout_ready(enc_k_dout_ready)
-    );
+    generate
+        if (HAS_INTERNAL_ENCRYPT) begin : gen_int_encrypt
+            kpke_encrypt #(
+                .HAS_INTERNAL_KECCAK(0)
+            ) u_encrypt (
+                .clk(clk),
+                .rst_n(rst_n),
+                .start(enc_start),
+                .busy(enc_busy),
+                .done(enc_done),
+                .in_we(enc_in_we),
+                .in_sel(enc_in_sel),
+                .in_addr(enc_in_addr),
+                .in_wdata(enc_in_wdata),
+                .out_rd(1'b0),
+                .out_addr(11'd0),
+                .out_rdata(),
+                .out_valid(),
+                .ct_we(enc_ct_we),
+                .ct_addr(enc_ct_addr),
+                .ct_dout(enc_ct_dout),
+                .ext_k_init(enc_k_init),
+                .ext_k_hash_type(enc_k_hash_type),
+                .ext_k_finalize(enc_k_finalize),
+                .ext_k_din(enc_k_din),
+                .ext_k_din_valid(enc_k_din_valid),
+                .ext_k_din_ready(enc_k_din_ready),
+                .ext_k_dout(enc_k_dout),
+                .ext_k_dout_valid(enc_k_dout_valid),
+                .ext_k_dout_ready(enc_k_dout_ready)
+            );
+
+            // No external encrypt port driven in this branch.
+            assign ext_enc_start    = 1'b0;
+            assign ext_enc_in_we    = 1'b0;
+            assign ext_enc_in_sel   = 2'b00;
+            assign ext_enc_in_addr  = 11'd0;
+            assign ext_enc_in_wdata = 8'd0;
+        end else begin : gen_ext_encrypt
+            // No local kpke_encrypt — drive the shared instance up at parent.
+            assign ext_enc_start    = enc_start;
+            assign ext_enc_in_we    = enc_in_we;
+            assign ext_enc_in_sel   = enc_in_sel;
+            assign ext_enc_in_addr  = enc_in_addr;
+            assign ext_enc_in_wdata = enc_in_wdata;
+
+            // Bring back encrypt status so the local FSM can sequence on it.
+            assign enc_busy    = ext_enc_busy;
+            assign enc_done    = ext_enc_done;
+            assign enc_ct_we   = ext_enc_ct_we;
+            assign enc_ct_addr = ext_enc_ct_addr;
+            assign enc_ct_dout = ext_enc_ct_dout;
+
+            // No local kpke_encrypt drives keccak; tie enc_k_* sources off so
+            // the local keccak MUX (gated by enc_owns_keccak == 0) is clean.
+            assign enc_k_init       = 1'b0;
+            assign enc_k_hash_type  = 2'b00;
+            assign enc_k_finalize   = 1'b0;
+            assign enc_k_din        = 8'd0;
+            assign enc_k_din_valid  = 1'b0;
+            assign enc_k_dout_ready = 1'b0;
+        end
+    endgenerate
 
     always @(posedge clk) begin
         if (in_we && !busy) begin

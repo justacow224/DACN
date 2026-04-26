@@ -290,23 +290,71 @@ module ml_kem_top #
     wire        dec_k_dout_valid;
     wire        dec_k_dout_ready;
 
+    // Lifted shared kpke_encrypt instance (Option D area share). Drives keccak
+    // directly through its own ext_k_* path, taking precedence over the
+    // op_sel_latched MUX whenever it is busy.
+    wire        kpke_enc_start;
+    wire        kpke_enc_in_we;
+    wire [1:0]  kpke_enc_in_sel;
+    wire [10:0] kpke_enc_in_addr;
+    wire [7:0]  kpke_enc_in_wdata;
+    wire        kpke_enc_busy;
+    wire        kpke_enc_done;
+    wire        kpke_enc_ct_we;
+    wire [10:0] kpke_enc_ct_addr;
+    wire [7:0]  kpke_enc_ct_dout;
+    wire        kpke_enc_k_init;
+    wire [1:0]  kpke_enc_k_hash_type;
+    wire        kpke_enc_k_finalize;
+    wire [7:0]  kpke_enc_k_din;
+    wire        kpke_enc_k_din_valid;
+    wire        kpke_enc_k_din_ready;
+    wire [7:0]  kpke_enc_k_dout;
+    wire        kpke_enc_k_dout_valid;
+    wire        kpke_enc_k_dout_ready;
+
+    // Per-owner ext_enc_* signals out of u_encaps / u_decaps (driven only when
+    // their HAS_INTERNAL_ENCRYPT == 0).
+    wire        enc_ext_enc_start;
+    wire        enc_ext_enc_in_we;
+    wire [1:0]  enc_ext_enc_in_sel;
+    wire [10:0] enc_ext_enc_in_addr;
+    wire [7:0]  enc_ext_enc_in_wdata;
+    wire        dec_ext_enc_start;
+    wire        dec_ext_enc_in_we;
+    wire [1:0]  dec_ext_enc_in_sel;
+    wire [10:0] dec_ext_enc_in_addr;
+    wire [7:0]  dec_ext_enc_in_wdata;
+
     wire [1:0]  k_owner = op_sel_latched;
-    wire        top_k_init       = (k_owner == OP_KEYGEN) ? kg_k_init :
+
+    // The shared kpke_encrypt instance preempts the op_sel MUX whenever it is
+    // running (ENCAPS top FSM and DECAPS top FSM stop driving keccak during
+    // S_ENC_*/S_DEC_*-style waits, and u_kpke_encrypt's ext_k_* drive matches
+    // a single owner per op since encaps/decaps are mutually exclusive).
+    wire        encrypt_owns_keccak = kpke_enc_busy;
+    wire        top_k_init       = encrypt_owns_keccak     ? kpke_enc_k_init :
+                                   (k_owner == OP_KEYGEN) ? kg_k_init :
                                    (k_owner == OP_ENCAPS) ? enc_k_init :
                                    (k_owner == OP_DECAPS) ? dec_k_init : 1'b0;
-    wire [1:0]  top_k_hash_type  = (k_owner == OP_KEYGEN) ? kg_k_hash_type :
+    wire [1:0]  top_k_hash_type  = encrypt_owns_keccak     ? kpke_enc_k_hash_type :
+                                   (k_owner == OP_KEYGEN) ? kg_k_hash_type :
                                    (k_owner == OP_ENCAPS) ? enc_k_hash_type :
                                    (k_owner == OP_DECAPS) ? dec_k_hash_type : 2'b00;
-    wire        top_k_finalize   = (k_owner == OP_KEYGEN) ? kg_k_finalize :
+    wire        top_k_finalize   = encrypt_owns_keccak     ? kpke_enc_k_finalize :
+                                   (k_owner == OP_KEYGEN) ? kg_k_finalize :
                                    (k_owner == OP_ENCAPS) ? enc_k_finalize :
                                    (k_owner == OP_DECAPS) ? dec_k_finalize : 1'b0;
-    wire [7:0]  top_k_din        = (k_owner == OP_KEYGEN) ? kg_k_din :
+    wire [7:0]  top_k_din        = encrypt_owns_keccak     ? kpke_enc_k_din :
+                                   (k_owner == OP_KEYGEN) ? kg_k_din :
                                    (k_owner == OP_ENCAPS) ? enc_k_din :
                                    (k_owner == OP_DECAPS) ? dec_k_din : 8'd0;
-    wire        top_k_din_valid  = (k_owner == OP_KEYGEN) ? kg_k_din_valid :
+    wire        top_k_din_valid  = encrypt_owns_keccak     ? kpke_enc_k_din_valid :
+                                   (k_owner == OP_KEYGEN) ? kg_k_din_valid :
                                    (k_owner == OP_ENCAPS) ? enc_k_din_valid :
                                    (k_owner == OP_DECAPS) ? dec_k_din_valid : 1'b0;
-    wire        top_k_dout_ready = (k_owner == OP_KEYGEN) ? kg_k_dout_ready :
+    wire        top_k_dout_ready = encrypt_owns_keccak     ? kpke_enc_k_dout_ready :
+                                   (k_owner == OP_KEYGEN) ? kg_k_dout_ready :
                                    (k_owner == OP_ENCAPS) ? enc_k_dout_ready :
                                    (k_owner == OP_DECAPS) ? dec_k_dout_ready : 1'b0;
     wire        top_k_din_ready;
@@ -327,17 +375,67 @@ module ml_kem_top #
         .dout_ready(top_k_dout_ready)
     );
 
-    assign kg_k_din_ready  = (k_owner == OP_KEYGEN) ? top_k_din_ready : 1'b0;
-    assign kg_k_dout       = (k_owner == OP_KEYGEN) ? top_k_dout : 8'd0;
-    assign kg_k_dout_valid = (k_owner == OP_KEYGEN) ? top_k_dout_valid : 1'b0;
+    // Keccak fanout. encrypt_owns_keccak preempts: when the shared encrypt is
+    // running, it owns keccak feedback and the op_sel parent gets idle returns.
+    assign kg_k_din_ready  = (!encrypt_owns_keccak && k_owner == OP_KEYGEN) ? top_k_din_ready : 1'b0;
+    assign kg_k_dout       = (!encrypt_owns_keccak && k_owner == OP_KEYGEN) ? top_k_dout       : 8'd0;
+    assign kg_k_dout_valid = (!encrypt_owns_keccak && k_owner == OP_KEYGEN) ? top_k_dout_valid : 1'b0;
 
-    assign enc_k_din_ready  = (k_owner == OP_ENCAPS) ? top_k_din_ready : 1'b0;
-    assign enc_k_dout       = (k_owner == OP_ENCAPS) ? top_k_dout : 8'd0;
-    assign enc_k_dout_valid = (k_owner == OP_ENCAPS) ? top_k_dout_valid : 1'b0;
+    assign enc_k_din_ready  = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? top_k_din_ready : 1'b0;
+    assign enc_k_dout       = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? top_k_dout       : 8'd0;
+    assign enc_k_dout_valid = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? top_k_dout_valid : 1'b0;
 
-    assign dec_k_din_ready  = (k_owner == OP_DECAPS) ? top_k_din_ready : 1'b0;
-    assign dec_k_dout       = (k_owner == OP_DECAPS) ? top_k_dout : 8'd0;
-    assign dec_k_dout_valid = (k_owner == OP_DECAPS) ? top_k_dout_valid : 1'b0;
+    assign dec_k_din_ready  = (!encrypt_owns_keccak && k_owner == OP_DECAPS) ? top_k_din_ready : 1'b0;
+    assign dec_k_dout       = (!encrypt_owns_keccak && k_owner == OP_DECAPS) ? top_k_dout       : 8'd0;
+    assign dec_k_dout_valid = (!encrypt_owns_keccak && k_owner == OP_DECAPS) ? top_k_dout_valid : 1'b0;
+
+    assign kpke_enc_k_din_ready  = encrypt_owns_keccak ? top_k_din_ready  : 1'b0;
+    assign kpke_enc_k_dout       = encrypt_owns_keccak ? top_k_dout       : 8'd0;
+    assign kpke_enc_k_dout_valid = encrypt_owns_keccak ? top_k_dout_valid : 1'b0;
+
+    // Shared kpke_encrypt I/O MUX: encaps owner during ENCAPS op, decaps owner
+    // during DECAPS op. Mutually exclusive at op-level — no contention.
+    assign kpke_enc_start    = (k_owner == OP_ENCAPS) ? enc_ext_enc_start    :
+                               (k_owner == OP_DECAPS) ? dec_ext_enc_start    : 1'b0;
+    assign kpke_enc_in_we    = (k_owner == OP_ENCAPS) ? enc_ext_enc_in_we    :
+                               (k_owner == OP_DECAPS) ? dec_ext_enc_in_we    : 1'b0;
+    assign kpke_enc_in_sel   = (k_owner == OP_ENCAPS) ? enc_ext_enc_in_sel   :
+                               (k_owner == OP_DECAPS) ? dec_ext_enc_in_sel   : 2'b00;
+    assign kpke_enc_in_addr  = (k_owner == OP_ENCAPS) ? enc_ext_enc_in_addr  :
+                               (k_owner == OP_DECAPS) ? dec_ext_enc_in_addr  : 11'd0;
+    assign kpke_enc_in_wdata = (k_owner == OP_ENCAPS) ? enc_ext_enc_in_wdata :
+                               (k_owner == OP_DECAPS) ? dec_ext_enc_in_wdata : 8'd0;
+
+    // Lifted shared kpke_encrypt instance.
+    kpke_encrypt #(
+        .HAS_INTERNAL_KECCAK(0)
+    ) u_kpke_encrypt (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(kpke_enc_start),
+        .busy(kpke_enc_busy),
+        .done(kpke_enc_done),
+        .in_we(kpke_enc_in_we),
+        .in_sel(kpke_enc_in_sel),
+        .in_addr(kpke_enc_in_addr),
+        .in_wdata(kpke_enc_in_wdata),
+        .out_rd(1'b0),
+        .out_addr(11'd0),
+        .out_rdata(),
+        .out_valid(),
+        .ct_we(kpke_enc_ct_we),
+        .ct_addr(kpke_enc_ct_addr),
+        .ct_dout(kpke_enc_ct_dout),
+        .ext_k_init(kpke_enc_k_init),
+        .ext_k_hash_type(kpke_enc_k_hash_type),
+        .ext_k_finalize(kpke_enc_k_finalize),
+        .ext_k_din(kpke_enc_k_din),
+        .ext_k_din_valid(kpke_enc_k_din_valid),
+        .ext_k_din_ready(kpke_enc_k_din_ready),
+        .ext_k_dout(kpke_enc_k_dout),
+        .ext_k_dout_valid(kpke_enc_k_dout_valid),
+        .ext_k_dout_ready(kpke_enc_k_dout_ready)
+    );
 
     integer i;
 
@@ -533,7 +631,8 @@ module ml_kem_top #
             );
 
             ml_kem_encaps #(
-                .HAS_INTERNAL_KECCAK(0)
+                .HAS_INTERNAL_KECCAK(0),
+                .HAS_INTERNAL_ENCRYPT(0)
             ) u_encaps (
                 .clk(clk),
                 .rst_n(rst_n),
@@ -561,11 +660,23 @@ module ml_kem_top #
                 .ext_k_din_ready(enc_k_din_ready),
                 .ext_k_dout(enc_k_dout),
                 .ext_k_dout_valid(enc_k_dout_valid),
-                .ext_k_dout_ready(enc_k_dout_ready)
+                .ext_k_dout_ready(enc_k_dout_ready),
+                // Shared kpke_encrypt at top level.
+                .ext_enc_start    (enc_ext_enc_start),
+                .ext_enc_in_we    (enc_ext_enc_in_we),
+                .ext_enc_in_sel   (enc_ext_enc_in_sel),
+                .ext_enc_in_addr  (enc_ext_enc_in_addr),
+                .ext_enc_in_wdata (enc_ext_enc_in_wdata),
+                .ext_enc_busy     ((k_owner == OP_ENCAPS) ? kpke_enc_busy    : 1'b0),
+                .ext_enc_done     ((k_owner == OP_ENCAPS) ? kpke_enc_done    : 1'b0),
+                .ext_enc_ct_we    ((k_owner == OP_ENCAPS) ? kpke_enc_ct_we   : 1'b0),
+                .ext_enc_ct_addr  ((k_owner == OP_ENCAPS) ? kpke_enc_ct_addr : 11'd0),
+                .ext_enc_ct_dout  ((k_owner == OP_ENCAPS) ? kpke_enc_ct_dout : 8'd0)
             );
 
             ml_kem_decaps #(
-                .HAS_INTERNAL_KECCAK(0)
+                .HAS_INTERNAL_KECCAK(0),
+                .HAS_INTERNAL_ENCRYPT(0)
             ) u_decaps (
                 .clk(clk),
                 .rst_n(rst_n),
@@ -589,7 +700,18 @@ module ml_kem_top #
                 .ext_k_din_ready(dec_k_din_ready),
                 .ext_k_dout(dec_k_dout),
                 .ext_k_dout_valid(dec_k_dout_valid),
-                .ext_k_dout_ready(dec_k_dout_ready)
+                .ext_k_dout_ready(dec_k_dout_ready),
+                // Shared kpke_encrypt at top level.
+                .ext_enc_start    (dec_ext_enc_start),
+                .ext_enc_in_we    (dec_ext_enc_in_we),
+                .ext_enc_in_sel   (dec_ext_enc_in_sel),
+                .ext_enc_in_addr  (dec_ext_enc_in_addr),
+                .ext_enc_in_wdata (dec_ext_enc_in_wdata),
+                .ext_enc_busy     ((k_owner == OP_DECAPS) ? kpke_enc_busy    : 1'b0),
+                .ext_enc_done     ((k_owner == OP_DECAPS) ? kpke_enc_done    : 1'b0),
+                .ext_enc_ct_we    ((k_owner == OP_DECAPS) ? kpke_enc_ct_we   : 1'b0),
+                .ext_enc_ct_addr  ((k_owner == OP_DECAPS) ? kpke_enc_ct_addr : 11'd0),
+                .ext_enc_ct_dout  ((k_owner == OP_DECAPS) ? kpke_enc_ct_dout : 8'd0)
             );
         end else begin : g_crypto_bypass
             assign keygen_done   = 1'b0;
@@ -626,6 +748,19 @@ module ml_kem_top #
             assign dec_k_din        = 8'd0;
             assign dec_k_din_valid  = 1'b0;
             assign dec_k_dout_ready = 1'b0;
+
+            // Bypass: shared kpke_encrypt has no owner. Tie off ext_enc_* so
+            // the lifted u_kpke_encrypt sees an idle start and stays in S_IDLE.
+            assign enc_ext_enc_start    = 1'b0;
+            assign enc_ext_enc_in_we    = 1'b0;
+            assign enc_ext_enc_in_sel   = 2'b00;
+            assign enc_ext_enc_in_addr  = 11'd0;
+            assign enc_ext_enc_in_wdata = 8'd0;
+            assign dec_ext_enc_start    = 1'b0;
+            assign dec_ext_enc_in_we    = 1'b0;
+            assign dec_ext_enc_in_sel   = 2'b00;
+            assign dec_ext_enc_in_addr  = 11'd0;
+            assign dec_ext_enc_in_wdata = 8'd0;
         end
     endgenerate
 

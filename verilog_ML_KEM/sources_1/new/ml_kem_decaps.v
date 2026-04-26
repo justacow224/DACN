@@ -1,7 +1,8 @@
 `timescale 1ns / 1ps
 
 module ml_kem_decaps #(
-    parameter HAS_INTERNAL_KECCAK = 1
+    parameter HAS_INTERNAL_KECCAK  = 1,
+    parameter HAS_INTERNAL_ENCRYPT = 1
 ) (
     input  wire         clk,
     input  wire         rst_n,
@@ -35,7 +36,21 @@ module ml_kem_decaps #(
     input  wire         ext_k_din_ready,
     input  wire [7:0]   ext_k_dout,
     input  wire         ext_k_dout_valid,
-    output wire         ext_k_dout_ready
+    output wire         ext_k_dout_ready,
+
+    // External kpke_encrypt interface (used only when HAS_INTERNAL_ENCRYPT==0).
+    // Forward signals: drive shared kpke_encrypt instance hosted at parent.
+    output wire         ext_enc_start,
+    output wire         ext_enc_in_we,
+    output wire [1:0]   ext_enc_in_sel,
+    output wire [10:0]  ext_enc_in_addr,
+    output wire [7:0]   ext_enc_in_wdata,
+    // Backward signals: shared kpke_encrypt status returned from parent.
+    input  wire         ext_enc_busy,
+    input  wire         ext_enc_done,
+    input  wire         ext_enc_ct_we,
+    input  wire [10:0]  ext_enc_ct_addr,
+    input  wire [7:0]   ext_enc_ct_dout
 );
 
     localparam [4:0] S_IDLE          = 5'd0;
@@ -131,11 +146,16 @@ module ml_kem_decaps #(
     wire        core_k_dout_valid;
     wire        core_k_dout_ready;
 
-    wire        core_owns_keccak = (state == S_DEC_START)  ||
-                                   (state == S_DEC_WAIT)   ||
-                                   (state == S_ENC_START)  ||
-                                   (state == S_ENC_WAIT)   ||
-                                   (state == S_ENC_SETTLE);
+    // When HAS_INTERNAL_ENCRYPT == 0, kpke_core no longer hosts its own
+    // u_encrypt (and u_decrypt does not use keccak), so the local encrypt-side
+    // keccak source is silent. The lifted shared kpke_encrypt at the top level
+    // owns keccak directly via its own ext_k_* path.
+    wire        core_owns_keccak = (HAS_INTERNAL_ENCRYPT != 0) &&
+                                   ((state == S_DEC_START)  ||
+                                    (state == S_DEC_WAIT)   ||
+                                    (state == S_ENC_START)  ||
+                                    (state == S_ENC_WAIT)   ||
+                                    (state == S_ENC_SETTLE));
 
     wire        shared_k_init       = core_owns_keccak ? core_k_init       : init_keccak;
     wire [1:0]  shared_k_hash_type  = core_owns_keccak ? core_k_hash_type  : hash_type;
@@ -260,7 +280,9 @@ module ml_kem_decaps #(
         end
     endgenerate
 
-    kpke_core u_core (
+    kpke_core #(
+        .HAS_INTERNAL_ENCRYPT(HAS_INTERNAL_ENCRYPT)
+    ) u_core (
         .clk(clk),
         .rst_n(rst_n),
         .start(core_start),
@@ -283,7 +305,20 @@ module ml_kem_decaps #(
         .k_din_ready(core_k_din_ready),
         .k_dout(core_k_dout),
         .k_dout_valid(core_k_dout_valid),
-        .k_dout_ready(core_k_dout_ready)
+        .k_dout_ready(core_k_dout_ready),
+        // Shared kpke_encrypt passthrough — lifted to top-level when
+        // HAS_INTERNAL_ENCRYPT==0. When HAS_INTERNAL_ENCRYPT==1, kpke_core
+        // ties forward outputs to 0 and ignores backward inputs.
+        .ext_enc_start    (ext_enc_start),
+        .ext_enc_in_we    (ext_enc_in_we),
+        .ext_enc_in_sel   (ext_enc_in_sel),
+        .ext_enc_in_addr  (ext_enc_in_addr),
+        .ext_enc_in_wdata (ext_enc_in_wdata),
+        .ext_enc_busy     (ext_enc_busy),
+        .ext_enc_done     (ext_enc_done),
+        .ext_enc_ct_we    (ext_enc_ct_we),
+        .ext_enc_ct_addr  (ext_enc_ct_addr),
+        .ext_enc_ct_dout  (ext_enc_ct_dout)
     );
 
     // Capture h/z slices from incoming decapsulation key stream.
