@@ -892,6 +892,7 @@ module kpke_encrypt #(
     // =============================================================
     // Main FSM
     // =============================================================
+    integer i_rst_buf;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state            <= S_IDLE;
@@ -930,6 +931,17 @@ module kpke_encrypt #(
             comp_base_offset <= 11'd0;
             comp_d_sel_reg   <= 2'b10;
             comp_mode_v      <= 1'b0;
+
+            // Explicit reset of prf_buf to eliminate [Synth 8-7137]
+            // set-and-reset-with-same-priority warning. Without this,
+            // Vivado synth resolves the ambiguity differently from sim,
+            // producing an on-silicon prf_buf that delivers degenerate
+            // (effectively zero) values to CBD for the r polynomial sample.
+            // Result: r=0 polynomial, t·r=0, encaps c2 = Compress_4(Decompress_1(m))
+            // exactly, c1 = e1 alone — exact pattern observed on KR260.
+            for (i_rst_buf = 0; i_rst_buf < 16; i_rst_buf = i_rst_buf + 1) begin
+                prf_buf[i_rst_buf] <= 64'd0;
+            end
         end else begin
             done             <= 1'b0;
             out_valid        <= 1'b0;

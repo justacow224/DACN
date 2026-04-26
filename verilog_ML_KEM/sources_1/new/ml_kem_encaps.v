@@ -241,6 +241,7 @@ module ml_kem_encaps #(
         end
     end
 
+    integer i_rst_buf;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state            <= S_IDLE;
@@ -270,6 +271,19 @@ module ml_kem_encaps #(
             enc_in_wdata     <= 8'd0;
 
             var_k            <= 12'd0;
+
+            // Explicit reset of buffer arrays. Without this, Vivado synth
+            // emits [Synth 8-7137] "set and reset with same priority" and
+            // warns of simulation mismatch — observed on KR260 as deterministic
+            // encaps ct corruption (r polynomial degenerated to 0). Behavioral
+            // sim doesn't see it because Verilog evaluates the conditional
+            // assigns deterministically; on silicon, the synthesized flop
+            // resolves the ambiguity differently.
+            for (i_rst_buf = 0; i_rst_buf < 32; i_rst_buf = i_rst_buf + 1) begin
+                h_buf[i_rst_buf]  <= 8'd0;
+                ss_buf[i_rst_buf] <= 8'd0;
+                r_buf[i_rst_buf]  <= 8'd0;
+            end
         end else begin
             done             <= 1'b0;
             out_valid        <= 1'b0;

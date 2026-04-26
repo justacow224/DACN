@@ -17,6 +17,20 @@ if {[llength $argv] < 1} {
 set xpr_path [file normalize [lindex $argv 0]]
 open_project $xpr_path
 
+# CRITICAL: ensure top is the BD wrapper (not standalone ml_kem_top, which
+# has 268 IO ports and fails at place_design). Some prior runs may have
+# left top set to ml_kem_top via strategy reset.
+set_property top ml_kem_bd_wrapper [current_fileset]
+update_compile_order -fileset sources_1
+puts "INFO: top fileset: [get_property top [current_fileset]]"
+
+# Reset synth strategy to default (in case conservative options were left over)
+set_property STRATEGY "Vivado Synthesis Defaults" [get_runs synth_1]
+set_property -name {STEPS.SYNTH_DESIGN.ARGS.FLATTEN_HIERARCHY} -value {rebuilt} -objects [get_runs synth_1]
+set_property -name {STEPS.SYNTH_DESIGN.ARGS.NO_LC}            -value {false} -objects [get_runs synth_1]
+set_property -name {STEPS.SYNTH_DESIGN.ARGS.RETIMING}         -value {false} -objects [get_runs synth_1]
+set_property -name {STEPS.SYNTH_DESIGN.ARGS.RESOURCE_SHARING} -value {auto}  -objects [get_runs synth_1]
+
 # Force re-synth (RTL changed)
 reset_run synth_1
 launch_runs impl_1 -to_step write_bitstream -jobs 8
