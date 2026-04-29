@@ -527,16 +527,20 @@ module kpke_decrypt (
         end
     end
 
-    // Canonical Xilinx single-port BRAM inference pattern (no reset on output reg).
-    // Fixes Synth 8-4767 dissolve observed when async reset is present on tmp_rdata.
-    wire        tmp_we    = (state == S_PW_READ_CAP) && (pw_idx != 2'd0);
-    wire [7:0]  tmp_waddr = coeff_idx;
-    wire [15:0] tmp_wdata = pw_host_dout;
-
+    // Step 2: Match acc_mem/w_mem pattern (sync reset on output reg only) which
+    // does infer BRAM successfully. The v8 no-reset variant kept dissolving due
+    // to a Vivado heuristic that needs reset on the read register to recognize
+    // the SDP-RAM template. Reset only acts on tmp_rdata (1 FF), not on the
+    // tmp_mem array, so the original Synth 8-7137 set/reset-same-priority
+    // ambiguity (which the v8 refactor was working around) does not return.
     always @(posedge clk) begin
-        tmp_rdata <= tmp_mem[tmp_raddr];
-        if (tmp_we) begin
-            tmp_mem[tmp_waddr] <= tmp_wdata;
+        if (!rst_n) begin
+            tmp_rdata <= 16'd0;
+        end else begin
+            tmp_rdata <= tmp_mem[tmp_raddr];
+            if ((state == S_PW_READ_CAP) && (pw_idx != 2'd0)) begin
+                tmp_mem[coeff_idx] <= pw_host_dout;
+            end
         end
     end
 

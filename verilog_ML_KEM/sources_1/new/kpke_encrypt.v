@@ -197,7 +197,12 @@ module kpke_encrypt #(
     // Single-lane memories
     (* ram_style = "block" *) reg [15:0] r_hat_mem [0:767];
     (* ram_style = "block" *) reg [15:0] acc_mem   [0:255];
-    (* ram_style = "block" *) reg [15:0] tmp_mem   [0:255];
+    // Step 2: tmp_mem split into 2 banks (even/odd addresses) so each bank has
+    // a single write port → infers as SDP-RAM. Original 256x16 single array
+    // had dual-write paths from CBD parallel coefficient pair, which Vivado
+    // cannot map to single-port BRAM and dissolved into 4,096 FFs.
+    (* ram_style = "block" *) reg [15:0] tmp_mem0  [0:127];
+    (* ram_style = "block" *) reg [15:0] tmp_mem1  [0:127];
 
     // =============================================================
     // Internal registers
@@ -885,39 +890,67 @@ module kpke_encrypt #(
         end
     end
 
-    // Refactored tmp_mem write logic — split into clean, BRAM-friendly form.
-    // ORIGINAL had cascaded if-else chain with mixed write paths. On KR260
-    // this resulted in invNTT writes not persisting in tmp_mem (forensic
-    // probes showed tmp_mem still containing CBD r data when U_ADDE1 read).
-    // The refactor below makes write_enable / write_addr / write_data
-    // combinational MUXes feeding a single per-port write, which is the
-    // canonical Xilinx BRAM/LUTRAM inference template.
+    // Step 2: bank-split tmp_mem write/read logic — each bank has a single
+    // write port (SDP-RAM friendly). Bank 0 holds even addresses, bank 1
+    // holds odd addresses. CBD parallel pair writes both banks at the same
+    // 7-bit row address; intt/pw single writes route to bank by coeff_idx[0].
+    //
+    // Read path: both banks are read in parallel each cycle, and a 1-cycle
+    // pipelined LSB selects the output bank — preserves the original
+    // 1-cycle latency from tmp_raddr to tmp_rdata so downstream FSM states
+    // (NTT_LOAD_LOOP, U/V_ACC_LOAD_B_LOOP, U/V_ADDE1/E2_LOAD_A_LOOP) see
+    // identical timing.
 
     wire        tmp_we_dual = cbd_ram_we && (noise_stage == 2'd0);
     wire        tmp_we_pw   = ((state == S_U_PW_READ_CAP) && (u_j != 2'd0)) ||
                               ((state == S_V_PW_READ_CAP) && (v_i != 2'd0));
     wire        tmp_we_intt = (state == S_U_INTT_READ_CAP) || (state == S_V_INTT_READ_CAP);
-    wire        tmp_we_any  = tmp_we_dual || tmp_we_pw || tmp_we_intt;
 
-    wire [7:0]  tmp_waddr_a = tmp_we_dual ? {cbd_ram_addr, 1'b0} : coeff_idx;
-    wire [15:0] tmp_wdata_a = tmp_we_dual ? cbd_ram_a0_din :
-                              tmp_we_intt ? intt_host_dout :
-                                            pw_host_dout;
-    wire [7:0]  tmp_waddr_b = {cbd_ram_addr, 1'b1};
-    wire [15:0] tmp_wdata_b = cbd_ram_a1_din;
+    wire [6:0]  tmp_waddr_single = coeff_idx[7:1];
+    wire [15:0] tmp_wdata_single = tmp_we_intt ? intt_host_dout : pw_host_dout;
+    wire        tmp_we_single    = tmp_we_pw || tmp_we_intt;
 
+    reg [15:0] tmp_rd0, tmp_rd1;
+    reg        tmp_raddr_lsb_d;
+
+    // Bank 0 (even addresses) — single write port
     always @(posedge clk) begin
         if (!rst_n) begin
-            tmp_rdata <= 16'd0;
+            tmp_rd0 <= 16'd0;
         end else begin
-            tmp_rdata <= tmp_mem[tmp_raddr];
-            if (tmp_we_any) begin
-                tmp_mem[tmp_waddr_a] <= tmp_wdata_a;
-            end
+            tmp_rd0 <= tmp_mem0[tmp_raddr[7:1]];
             if (tmp_we_dual) begin
-                tmp_mem[tmp_waddr_b] <= tmp_wdata_b;
+                tmp_mem0[cbd_ram_addr] <= cbd_ram_a0_din;
+            end else if (tmp_we_single && !coeff_idx[0]) begin
+                tmp_mem0[tmp_waddr_single] <= tmp_wdata_single;
             end
         end
+    end
+
+    // Bank 1 (odd addresses) — single write port
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            tmp_rd1 <= 16'd0;
+        end else begin
+            tmp_rd1 <= tmp_mem1[tmp_raddr[7:1]];
+            if (tmp_we_dual) begin
+                tmp_mem1[cbd_ram_addr] <= cbd_ram_a1_din;
+            end else if (tmp_we_single && coeff_idx[0]) begin
+                tmp_mem1[tmp_waddr_single] <= tmp_wdata_single;
+            end
+        end
+    end
+
+    // 1-cycle pipeline of read-address LSB to align with sync BRAM read latency
+    always @(posedge clk) begin
+        if (!rst_n) tmp_raddr_lsb_d <= 1'b0;
+        else        tmp_raddr_lsb_d <= tmp_raddr[0];
+    end
+
+    // Bank-mux output — combinational; functionally equivalent to original
+    // tmp_rdata <= tmp_mem[tmp_raddr] (1-cycle latency preserved).
+    always @(*) begin
+        tmp_rdata = tmp_raddr_lsb_d ? tmp_rd1 : tmp_rd0;
     end
 
     // =============================================================
