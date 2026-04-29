@@ -1,5 +1,13 @@
 ﻿# ML-KEM-768 RTL Implementation — Full Roadmap (Batch 1→6)
 
+> **Status update (2026-04-27, v9):** Tất cả 6 batches đã đóng. Final state RTL track:
+> - **KAT 100/100 PASS on-board** (KR260 ZU5EV, 3 notebooks cross-check)
+> - **LUT 25,590 (21.85%)** sau 9 phases tối ưu (v6 Phase C global keccak share + v9 Option D global kpke_encrypt share)
+> - **WNS +2.605 ns @ 100 MHz**
+> - Latency: KeyGen 645.8 µs / Encaps 861.1 µs / Decaps 1273 µs
+> - Final architecture **vượt qua "Shared-Core" target ban đầu** — lifted singleton instances cho cả Keccak và kpke_encrypt tại `ml_kem_top` (giảm ~30k LUT keccak share + 8k LUT encrypt share).
+> - Tham khảo runbook v9: `docs/aZ/source code aZ/batch 6+ - Area optimization/2026-04-21__batch6-ooc-qor-runbook.md`
+
 ## Dependency Graph (Topological Order)
 
 ```mermaid

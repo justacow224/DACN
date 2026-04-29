@@ -99,7 +99,11 @@ module ml_kem_keygen #(
     reg [7:0] h_pk_reg [0:31];
     
     // Keccak Buffers
-    reg [63:0] prf_buf [0:15];
+    // BRAM-friendly canonical pattern: no async/sync reset, single-port write
+    // in dedicated always block. PRF_WAIT writes all 16 words before CBD reads,
+    // so stale-on-reset is harmless (verified by S_PRF_WAIT -> S_CBD_WAIT flow).
+    (* ram_style = "block" *) reg [63:0] prf_buf [0:15];
+    reg [63:0] prf_buf_rdata;
     reg [3:0]  prf_word_idx;
     reg [2:0]  prf_byte_idx;
     reg [63:0] prf_shift;
@@ -273,7 +277,22 @@ module ml_kem_keygen #(
     reg         cbd_start;
     wire        cbd_done;
     wire [3:0]  cbd_buf_addr;
-    wire [63:0] cbd_buf_dout = prf_buf[cbd_buf_addr]; // Feed from internal PRF buffer
+    // 1-cycle sync read for BRAM inference (CBD module's READ_WORD->PROCESS
+    // FSM is designed for this latency — see comment in poly_cbd_eta2_top).
+    wire [63:0] cbd_buf_dout = prf_buf_rdata;
+    always @(posedge clk) begin
+        prf_buf_rdata <= prf_buf[cbd_buf_addr];
+    end
+
+    // Dedicated single-port BRAM write block (no reset, single write port).
+    wire        prf_buf_we_w    = (state == S_PRF_WAIT) && k_dout_valid && (prf_byte_idx == 3'd7);
+    wire [3:0]  prf_buf_waddr_w = prf_word_idx;
+    wire [63:0] prf_buf_wdata_w = {k_dout, prf_shift[63:8]};
+    always @(posedge clk) begin
+        if (prf_buf_we_w) begin
+            prf_buf[prf_buf_waddr_w] <= prf_buf_wdata_w;
+        end
+    end
     wire        cbd_ram_we;
     wire [6:0]  cbd_ram_addr;
     wire [15:0] cbd_ram_a0_din;
@@ -637,9 +656,9 @@ module ml_kem_keygen #(
                             sigma_reg[i_clr_buf] <= 8'd0;
                             h_pk_reg[i_clr_buf]  <= 8'd0;
                         end
-                        for (i_clr_buf = 0; i_clr_buf < 16; i_clr_buf = i_clr_buf + 1) begin
-                            prf_buf[i_clr_buf] <= 64'd0;
-                        end
+                        // prf_buf clear removed — moved to dedicated BRAM write
+                        // block. PRF_WAIT writes all 16 words before CBD reads,
+                        // so stale data is overwritten before use.
                         prf_word_idx <= 4'd0;
                         prf_byte_idx <= 3'd0;
                         prf_shift    <= 64'd0;
@@ -723,11 +742,12 @@ module ml_kem_keygen #(
 
 
                 S_PRF_WAIT: begin
+                    // prf_buf write moved to dedicated single-port BRAM block
+                    // above. FSM here only updates indices/shift/state.
                     fsm_k_dout_ready <= 1;
                     if (k_dout_valid) begin
                         prf_shift <= {k_dout, prf_shift[63:8]};
                         if (prf_byte_idx == 7) begin
-                            prf_buf[prf_word_idx] <= {k_dout, prf_shift[63:8]};
                             prf_word_idx <= prf_word_idx + 1;
                             prf_byte_idx <= 0;
                             if (prf_word_idx == 15) begin

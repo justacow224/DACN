@@ -203,7 +203,11 @@ module kpke_encrypt #(
     // Internal registers
     // =============================================================
     reg [7:0] rho_reg [0:31];
-    reg [63:0] prf_buf [0:15];
+    // BRAM-friendly canonical pattern: no async reset, single-port write,
+    // explicit ram_style attr. PRF_WAIT fully fills prf_buf (16 words) before
+    // CBD reads via cbd_buf_dout, so stale-on-reset is harmless.
+    (* ram_style = "block" *) reg [63:0] prf_buf [0:15];
+    reg [63:0] prf_buf_rdata;
     reg [63:0] prf_shift;
 
     reg [1:0] decode_idx;
@@ -430,7 +434,24 @@ module kpke_encrypt #(
     wire [15:0] cbd_ram_a0_din;
     wire [15:0] cbd_ram_a1_din;
 
-    assign cbd_buf_dout = prf_buf[cbd_buf_addr];
+    // Canonical Xilinx single-port BRAM: dedicated write-only always block
+    // with no reset. Triggered when PRF_WAIT has accumulated 8 bytes into
+    // prf_shift and is ready to commit a 64-bit word into prf_buf.
+    wire        prf_buf_we_w    = (state == S_PRF_WAIT) && k_dout_valid && fsm_k_dout_ready && (prf_byte_idx == 3'd7);
+    wire [3:0]  prf_buf_waddr_w = prf_word_idx;
+    wire [63:0] prf_buf_wdata_w = {k_dout, prf_shift[63:8]};
+
+    always @(posedge clk) begin
+        if (prf_buf_we_w) begin
+            prf_buf[prf_buf_waddr_w] <= prf_buf_wdata_w;
+        end
+    end
+
+    // 1-cycle sync read for BRAM inference (matches CBD READ_WORD->PROCESS latency)
+    always @(posedge clk) begin
+        prf_buf_rdata <= prf_buf[cbd_buf_addr];
+    end
+    assign cbd_buf_dout = prf_buf_rdata;
 
     poly_cbd_eta2_top u_cbd (
         .clk(clk),
@@ -909,7 +930,6 @@ module kpke_encrypt #(
     // =============================================================
     // Main FSM
     // =============================================================
-    integer i_rst_buf;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state            <= S_IDLE;
@@ -949,16 +969,12 @@ module kpke_encrypt #(
             comp_d_sel_reg   <= 2'b10;
             comp_mode_v      <= 1'b0;
 
-            // Explicit reset of prf_buf to eliminate [Synth 8-7137]
-            // set-and-reset-with-same-priority warning. Without this,
-            // Vivado synth resolves the ambiguity differently from sim,
-            // producing an on-silicon prf_buf that delivers degenerate
-            // (effectively zero) values to CBD for the r polynomial sample.
-            // Result: r=0 polynomial, t·r=0, encaps c2 = Compress_4(Decompress_1(m))
-            // exactly, c1 = e1 alone — exact pattern observed on KR260.
-            for (i_rst_buf = 0; i_rst_buf < 16; i_rst_buf = i_rst_buf + 1) begin
-                prf_buf[i_rst_buf] <= 64'd0;
-            end
+            // prf_buf has NO reset — moved to dedicated single-port BRAM
+            // always block. Functional safety: PRF_WAIT writes all 16 words
+            // before S_CBD_START, so any stale data is overwritten before
+            // CBD reads. The previous Synth 8-7137 silicon bug stemmed from
+            // mixed reset+set priorities; by removing the reset entirely the
+            // ambiguity is gone and Vivado infers a true BRAM.
         end else begin
             done             <= 1'b0;
             out_valid        <= 1'b0;
@@ -1015,12 +1031,9 @@ module kpke_encrypt #(
                         comp_base_offset <= 11'd0;
                         comp_d_sel_reg   <= 2'b10;
                         comp_mode_v      <= 1'b0;
-                        // Soft-clear PRF output buffer on each start so noise_stage=0
-                        // (r polynomial) reads fresh CBD output, not residue from a
-                        // prior encrypt call.
-                        for (i_rst_buf = 0; i_rst_buf < 16; i_rst_buf = i_rst_buf + 1) begin
-                            prf_buf[i_rst_buf] <= 64'd0;
-                        end
+                        // No prf_buf clear — PRF_WAIT will fully overwrite all 16
+                        // words before S_CBD_START reads. Removing this for-loop
+                        // restores BRAM inference (was blocking 8-4767 dissolve).
                         state            <= S_DECODE_EK_START;
                     end
                 end
@@ -1099,10 +1112,12 @@ module kpke_encrypt #(
                 end
 
                 S_PRF_WAIT: begin
+                    // prf_buf write moved to dedicated always block below
+                    // (canonical Xilinx single-port BRAM, no async reset).
+                    // FSM here only updates indices/shift register/state.
                     if (k_dout_valid && fsm_k_dout_ready) begin
                         prf_shift <= {k_dout, prf_shift[63:8]};
                         if (prf_byte_idx == 3'd7) begin
-                            prf_buf[prf_word_idx] <= {k_dout, prf_shift[63:8]};
                             prf_byte_idx <= 3'd0;
                             if (prf_word_idx == 4'd15) begin
                                 fsm_k_dout_ready <= 1'b0;

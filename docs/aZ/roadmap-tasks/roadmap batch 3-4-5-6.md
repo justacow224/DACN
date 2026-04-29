@@ -1,5 +1,9 @@
 ﻿# Roadmap: Batch 3 → 6 (ML-KEM-768 Pure RTL)
 
+> **Status update (2026-04-27, v9):** Tất cả 4 batches (3,4,5,6) đã đóng + 3 phases tối ưu thêm (Phase C global keccak share, Option A reset hygiene, Option D global kpke_encrypt share). KAT 100/100 PASS on-board. Final LUT 25,590 (21.85%) WNS +2.605 ns @ 100 MHz.
+>
+> **Stale references trong doc này:** Phần Batch 5 có table so sánh "Dual-Instantiation (✅ current) vs Shared-Core (🎯 target)" — đã được vượt qua tại v9 Option D: kpke_encrypt lifted thành **single shared instance** tại `ml_kem_top` (mạnh hơn cả Shared-Core target). Nội dung dưới đây giữ nguyên làm historical planning record.
+
 > **Platform:** Kria KR260 (ZU5EV) | **Clock:** 100 MHz | **Architecture:** Sequential Host-Port Pump
 
 ---

@@ -4,6 +4,24 @@
     `define TB_BYPASS_CRYPTO 0
 `endif
 
+// =============================================================================
+// Optional cycle profiler binding. Compile with +define+CYCLE_PROFILE to enable
+// per-op cycle breakdown dump (axi_io / compute / keccak / non_keccak / control).
+// Default behavior unchanged for regression runs.
+// =============================================================================
+`ifdef CYCLE_PROFILE
+bind ml_kem_top cycle_profiler u_cycle_profiler (
+    .clk(clk),
+    .rst_n(rst_n),
+    .state(state),
+    .start_pulse(cfg_start_pulse),
+    .op_sel_latched(op_sel_latched),
+    .top_k_din_valid(top_k_din_valid),
+    .top_k_dout_valid(top_k_dout_valid),
+    .kpke_enc_busy(kpke_enc_busy)
+);
+`endif
+
 module tb_ml_kem_top;
 
     localparam int C_S_AXI_ADDR_WIDTH = 8;
