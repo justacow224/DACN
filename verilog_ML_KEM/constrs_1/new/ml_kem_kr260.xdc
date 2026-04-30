@@ -26,14 +26,18 @@
 # Applies to all three Keccak instances (keygen/encaps/decaps).
 # ---------------------------------------------------------------
 
-set_property MAX_FANOUT 64 [get_cells -hier -filter {NAME =~ *u_keccak/state_reg*}]
+# Step 3.K1: sponge state_reg[0:199] removed (deduplicated with core A array).
+# The original constraint on *u_keccak/state_reg* now matches no cells. The
+# canonical Keccak state lives at *u_keccak/u_keccak_core/A_reg* (25 × 64-bit
+# lanes). Retarget the fanout constraint to A so the silicon margin recovery
+# documented above remains in effect.
+set_property MAX_FANOUT 64 [get_cells -hier -filter {NAME =~ *u_keccak/u_keccak_core/A_reg*}]
 
 # Note: fsm_state_reg / finalize_keccak_reg existed in an earlier RTL revision
 # but are no longer synthesized as cells with those names in the current build
 # (the 2025-04 rebuild log showed "No cells matched"). Rely on Vivado's
 # automatic BUFG insertion in Phase 4.1.1.1 for the remaining high-fanout
-# Keccak nets (u_*/u_keccak/i___232_n_0, state_out[1599]_i_1_*_n_0, A) —
-# 16 BUFGs were inserted automatically on that pass.
+# Keccak nets — 16 BUFGs were inserted automatically on that pass.
 
 
 # ---------------------------------------------------------------

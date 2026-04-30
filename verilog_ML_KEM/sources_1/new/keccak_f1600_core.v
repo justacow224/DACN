@@ -3,9 +3,27 @@
 module keccak_f1600_core (
     input  wire             clk,
     input  wire             rst_n,
+    // Permutation trigger
     input  wire             start,
+    // Step 3.K1: load_on_start controls whether `start` reloads A from
+    // state_in (legacy TB-direct mode) or keeps current A (sponge mode,
+    // which builds state via byte-XOR interface below).
+    input  wire             load_on_start,
     input  wire [1599:0]    state_in,
-    output reg  [1599:0]    state_out,
+    // Step 3.K1: byte-level absorb/squeeze interface — sponge uses this
+    // to XOR one input byte into A per cycle (absorb), and to read one
+    // byte of A combinationally (squeeze). Eliminates the 1,600 FF
+    // state_reg duplicate that sponge previously held.
+    input  wire             init,             // pulse high to clear A to 0
+    input  wire             xor_we,           // 1 = XOR xor_byte_data into A at xor_byte_addr
+    input  wire [7:0]       xor_byte_addr,    // 0..199 byte address (lane=addr[7:3], byte_in_lane=addr[2:0])
+    input  wire [7:0]       xor_byte_data,
+    output wire [7:0]       byte_dout,        // combinational byte read of A at xor_byte_addr
+    // Step 3.K0: state_out is now a combinational view of A (no register).
+    // After the final round, A holds the post-permutation state and stays
+    // stable while FSM is back in IDLE — sponge's 1-cycle-after-done capture
+    // window sees identical data to the previous registered version.
+    output wire [1599:0]    state_out,
     output reg              done
 );
 
@@ -106,37 +124,70 @@ module keccak_f1600_core (
             fsm_state <= IDLE;
             round_idx <= 0;
             done      <= 0;
-            state_out <= 0;
             for (i = 0; i < 25; i = i + 1) A[i] <= 0;
         end else begin
             done <= 0;
             case (fsm_state)
                 IDLE: begin
+                    // Step 3.K1 priority: start > init > xor_we (mutually
+                    // exclusive in practice from sponge/TB drivers, but
+                    // explicit precedence avoids Vivado multi-driver warnings).
                     if (start) begin
                         fsm_state <= CALC;
                         round_idx <= 0;
-                        for (i = 0; i < 25; i = i + 1) begin
-                            A[i] <= state_in[i*64 +: 64];
+                        if (load_on_start) begin
+                            // Legacy TB-direct mode: load full state from state_in.
+                            for (i = 0; i < 25; i = i + 1) begin
+                                A[i] <= state_in[i*64 +: 64];
+                            end
                         end
+                        // else: sponge mode — A retains its absorb-XOR-built
+                        //  contents and goes straight into permutation.
+                    end else if (init) begin
+                        // Sponge-issued state clear (replaces sponge's prior
+                        // for-loop reset of state_reg[0:199]).
+                        for (i = 0; i < 25; i = i + 1) A[i] <= 0;
+                    end else if (xor_we) begin
+                        // Byte-wise absorb XOR: XOR xor_byte_data into the byte
+                        // of A at byte address xor_byte_addr (lane = [7:3],
+                        // byte position in lane = [2:0]).
+                        A[xor_byte_addr[7:3]][xor_byte_addr[2:0]*8 +: 8] <=
+                            A[xor_byte_addr[7:3]][xor_byte_addr[2:0]*8 +: 8] ^ xor_byte_data;
                     end
                 end
-                
+
                 CALC: begin
+                    // Always update A from A_next (including the final round).
+                    // Removes the 1,600-FF state_out copy that previously
+                    // duplicated A's contents at end-of-permutation.
+                    for (i = 0; i < 25; i = i + 1) begin
+                        A[i] <= A_next[i];
+                    end
+
                     if (round_idx == 23) begin
                         fsm_state <= IDLE;
                         done      <= 1;
-                        for (i = 0; i < 25; i = i + 1) begin
-                            state_out[i*64 +: 64] <= A_next[i];
-                        end
                     end else begin
                         round_idx <= round_idx + 1;
-                        for (i = 0; i < 25; i = i + 1) begin
-                            A[i] <= A_next[i];
-                        end
                     end
                 end
             endcase
         end
     end
+
+    // Combinational expose of A as the 1600-bit state_out view.
+    // Sponge captures one cycle after `done`, when fsm_state is IDLE and A
+    // is no longer being updated, so the data is stable for the capture
+    // window. No additional register is inserted, saving 1,600 FF.
+    genvar gi;
+    generate
+        for (gi = 0; gi < 25; gi = gi + 1) begin : gen_state_out
+            assign state_out[gi*64 +: 64] = A[gi];
+        end
+    endgenerate
+
+    // Step 3.K1: combinational byte read for sponge squeeze path.
+    // byte_dout = A[xor_byte_addr/8][xor_byte_addr%8 * 8 +: 8]
+    assign byte_dout = A[xor_byte_addr[7:3]][xor_byte_addr[2:0]*8 +: 8];
 
 endmodule

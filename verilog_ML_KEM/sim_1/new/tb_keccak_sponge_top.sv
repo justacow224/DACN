@@ -93,30 +93,51 @@ module tb_keccak_sponge_top();
     // =========================================================
     // 5. HELPER TASKS
     // =========================================================
+    task automatic start_hash(input logic [1:0] mode);
+        @(negedge clk);
+        init        = 1;
+        hash_type   = mode;
+        is_running  = 1;
+        cycle_count = 0;
+        @(posedge clk);
+        @(negedge clk);
+        init = 0;
+    endtask
+
+    task automatic pulse_finalize();
+        @(negedge clk);
+        finalize = 1;
+        @(posedge clk);
+        @(negedge clk);
+        finalize = 0;
+    endtask
+
     task automatic feed_message();
         integer i;
         for (i = 0; i < 3; i = i + 1) begin
+            @(negedge clk);
             din = input_msg[i];
             din_valid = 1;
             do begin
                 @(posedge clk);
             end while (!din_ready);
         end
+        @(negedge clk);
         din_valid = 0;
-        @(posedge clk);
     endtask
 
     task automatic feed_message_200();
         integer i;
         for (i = 0; i < 200; i = i + 1) begin
+            @(negedge clk);
             din = i[7:0]; // 0, 1, 2, ..., 199
             din_valid = 1;
             do begin
                 @(posedge clk);
             end while (!din_ready);
         end
+        @(negedge clk);
         din_valid = 0;
-        @(posedge clk);
     endtask
 
     integer i, errors;
@@ -133,10 +154,9 @@ module tb_keccak_sponge_top();
 
         // --- SHAKE128 ---
         $display(">> RUNNING TESTCASE 1: SHAKE128");
-        @(posedge clk); init = 1; hash_type = 2'b00; is_running = 1; cycle_count = 0;
-        @(posedge clk); init = 0;
+        start_hash(2'b00);
         feed_message();
-        finalize = 1; @(posedge clk); finalize = 0;
+        pulse_finalize();
 
         errors = 0;
         for (i = 0; i < 32; i = i + 1) begin
@@ -154,10 +174,9 @@ module tb_keccak_sponge_top();
         // --- SHAKE256 ---
         $display("-------------------------------------------------");
         $display(">> RUNNING TESTCASE 2: SHAKE256");
-        @(posedge clk); init = 1; hash_type = 2'b01; is_running = 1; cycle_count = 0;
-        @(posedge clk); init = 0;
+        start_hash(2'b01);
         feed_message();
-        finalize = 1; @(posedge clk); finalize = 0;
+        pulse_finalize();
 
         errors = 0;
         for (i = 0; i < 32; i = i + 1) begin
@@ -175,10 +194,9 @@ module tb_keccak_sponge_top();
         // --- SHA3-256 ---
         $display("-------------------------------------------------");
         $display(">> RUNNING TESTCASE 3: SHA3-256");
-        @(posedge clk); init = 1; hash_type = 2'b10; is_running = 1; cycle_count = 0;
-        @(posedge clk); init = 0;
+        start_hash(2'b10);
         feed_message();
-        finalize = 1; @(posedge clk); finalize = 0;
+        pulse_finalize();
 
         errors = 0;
         for (i = 0; i < 32; i = i + 1) begin
@@ -196,10 +214,9 @@ module tb_keccak_sponge_top();
         // --- SHA3-512 ---
         $display("-------------------------------------------------");
         $display(">> RUNNING TESTCASE 4: SHA3-512");
-        @(posedge clk); init = 1; hash_type = 2'b11; is_running = 1; cycle_count = 0;
-        @(posedge clk); init = 0;
+        start_hash(2'b11);
         feed_message();
-        finalize = 1; @(posedge clk); finalize = 0;
+        pulse_finalize();
 
         errors = 0;
         for (i = 0; i < 64; i = i + 1) begin
@@ -217,10 +234,9 @@ module tb_keccak_sponge_top();
         // --- MULTI-BLOCK ABSORB ---
         $display("-------------------------------------------------");
         $display(">> RUNNING TESTCASE 5: MULTI-BLOCK ABSORB (SHAKE128)");
-        @(posedge clk); init = 1; hash_type = 2'b00; is_running = 1; cycle_count = 0;
-        @(posedge clk); init = 0;
+        start_hash(2'b00);
         feed_message_200();
-        finalize = 1; @(posedge clk); finalize = 0;
+        pulse_finalize();
 
         errors = 0;
         for (i = 0; i < 32; i = i + 1) begin
@@ -238,10 +254,9 @@ module tb_keccak_sponge_top();
         // --- MULTI-BLOCK SQUEEZE ---
         $display("-------------------------------------------------");
         $display(">> RUNNING TESTCASE 6: MULTI-BLOCK SQUEEZE (SHAKE128)");
-        @(posedge clk); init = 1; hash_type = 2'b00; is_running = 1; cycle_count = 0;
-        @(posedge clk); init = 0;
+        start_hash(2'b00);
         feed_message();
-        finalize = 1; @(posedge clk); finalize = 0;
+        pulse_finalize();
 
         errors = 0;
         for (i = 0; i < 200; i = i + 1) begin

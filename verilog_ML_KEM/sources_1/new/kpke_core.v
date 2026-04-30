@@ -1,7 +1,8 @@
 `timescale 1ns / 1ps
 
 module kpke_core #(
-    parameter HAS_INTERNAL_ENCRYPT = 1
+    parameter HAS_INTERNAL_ENCRYPT = 1,
+    parameter HAS_INTERNAL_POLY    = 1
 ) (
     input  wire         clk,
     input  wire         rst_n,
@@ -52,7 +53,59 @@ module kpke_core #(
     input  wire         ext_enc_done,
     input  wire         ext_enc_ct_we,
     input  wire [10:0]  ext_enc_ct_addr,
-    input  wire [7:0]   ext_enc_ct_dout
+    input  wire [7:0]   ext_enc_ct_dout,
+
+    // External shared decrypt-side poly-engine interface, used only when
+    // HAS_INTERNAL_POLY == 0.
+    output wire         ext_dec_fromb_start,
+    input  wire         ext_dec_fromb_done,
+    input  wire [8:0]   ext_dec_fromb_byte_addr,
+    output wire [7:0]   ext_dec_fromb_byte_din,
+    input  wire         ext_dec_fromb_coeff_we,
+    input  wire [6:0]   ext_dec_fromb_coeff_addr,
+    input  wire [15:0]  ext_dec_fromb_coeff_a0,
+    input  wire [15:0]  ext_dec_fromb_coeff_a1,
+
+    output wire         ext_dec_ntt_start,
+    input  wire         ext_dec_ntt_done,
+    output wire         ext_dec_ntt_host_we,
+    output wire [7:0]   ext_dec_ntt_host_addr,
+    output wire [15:0]  ext_dec_ntt_host_din,
+    input  wire [15:0]  ext_dec_ntt_host_dout,
+
+    output wire         ext_dec_intt_start,
+    input  wire         ext_dec_intt_done,
+    output wire         ext_dec_intt_host_we,
+    output wire [7:0]   ext_dec_intt_host_addr,
+    output wire [15:0]  ext_dec_intt_host_din,
+    input  wire [15:0]  ext_dec_intt_host_dout,
+
+    output wire         ext_dec_pw_start,
+    input  wire         ext_dec_pw_done,
+    output wire         ext_dec_pw_host_sel,
+    output wire         ext_dec_pw_host_we,
+    output wire [7:0]   ext_dec_pw_host_addr,
+    output wire [15:0]  ext_dec_pw_host_din,
+    input  wire [15:0]  ext_dec_pw_host_dout,
+
+    output wire         ext_dec_add_start,
+    output wire         ext_dec_add_is_sub,
+    input  wire         ext_dec_add_done,
+    output wire         ext_dec_add_host_sel,
+    output wire         ext_dec_add_host_we,
+    output wire [7:0]   ext_dec_add_host_addr,
+    output wire [15:0]  ext_dec_add_host_din,
+    input  wire [15:0]  ext_dec_add_host_dout,
+
+    output wire         ext_dec_comp_start,
+    output wire [1:0]   ext_dec_comp_d_sel,
+    input  wire         ext_dec_comp_done,
+    input  wire [6:0]   ext_dec_comp_coeff_addr,
+    output wire [15:0]  ext_dec_comp_coeff_a0,
+    output wire [15:0]  ext_dec_comp_coeff_a1,
+    input  wire         ext_dec_comp_byte_we,
+    input  wire [8:0]   ext_dec_comp_byte_addr,
+    input  wire [7:0]   ext_dec_comp_byte_dout
 );
 
     localparam [1:0] MODE_DECRYPT = 2'b00;
@@ -96,7 +149,9 @@ module kpke_core #(
         end
     end
 
-    kpke_decrypt u_decrypt (
+    kpke_decrypt #(
+        .HAS_INTERNAL_POLY(HAS_INTERNAL_POLY)
+    ) u_decrypt (
         .clk(clk),
         .rst_n(rst_n),
         .start(dec_start_r),
@@ -113,7 +168,51 @@ module kpke_core #(
         .msg_we(),
         .msg_addr(),
         .msg_dout(),
-        .m_out(dec_m_out)
+        .m_out(dec_m_out),
+        .ext_fromb_start(ext_dec_fromb_start),
+        .ext_fromb_done(ext_dec_fromb_done),
+        .ext_fromb_byte_addr(ext_dec_fromb_byte_addr),
+        .ext_fromb_byte_din(ext_dec_fromb_byte_din),
+        .ext_fromb_coeff_we(ext_dec_fromb_coeff_we),
+        .ext_fromb_coeff_addr(ext_dec_fromb_coeff_addr),
+        .ext_fromb_coeff_a0(ext_dec_fromb_coeff_a0),
+        .ext_fromb_coeff_a1(ext_dec_fromb_coeff_a1),
+        .ext_ntt_start(ext_dec_ntt_start),
+        .ext_ntt_done(ext_dec_ntt_done),
+        .ext_ntt_host_we(ext_dec_ntt_host_we),
+        .ext_ntt_host_addr(ext_dec_ntt_host_addr),
+        .ext_ntt_host_din(ext_dec_ntt_host_din),
+        .ext_ntt_host_dout(ext_dec_ntt_host_dout),
+        .ext_intt_start(ext_dec_intt_start),
+        .ext_intt_done(ext_dec_intt_done),
+        .ext_intt_host_we(ext_dec_intt_host_we),
+        .ext_intt_host_addr(ext_dec_intt_host_addr),
+        .ext_intt_host_din(ext_dec_intt_host_din),
+        .ext_intt_host_dout(ext_dec_intt_host_dout),
+        .ext_pw_start(ext_dec_pw_start),
+        .ext_pw_done(ext_dec_pw_done),
+        .ext_pw_host_sel(ext_dec_pw_host_sel),
+        .ext_pw_host_we(ext_dec_pw_host_we),
+        .ext_pw_host_addr(ext_dec_pw_host_addr),
+        .ext_pw_host_din(ext_dec_pw_host_din),
+        .ext_pw_host_dout(ext_dec_pw_host_dout),
+        .ext_add_start(ext_dec_add_start),
+        .ext_add_is_sub(ext_dec_add_is_sub),
+        .ext_add_done(ext_dec_add_done),
+        .ext_add_host_sel(ext_dec_add_host_sel),
+        .ext_add_host_we(ext_dec_add_host_we),
+        .ext_add_host_addr(ext_dec_add_host_addr),
+        .ext_add_host_din(ext_dec_add_host_din),
+        .ext_add_host_dout(ext_dec_add_host_dout),
+        .ext_comp_start(ext_dec_comp_start),
+        .ext_comp_d_sel(ext_dec_comp_d_sel),
+        .ext_comp_done(ext_dec_comp_done),
+        .ext_comp_coeff_addr(ext_dec_comp_coeff_addr),
+        .ext_comp_coeff_a0(ext_dec_comp_coeff_a0),
+        .ext_comp_coeff_a1(ext_dec_comp_coeff_a1),
+        .ext_comp_byte_we(ext_dec_comp_byte_we),
+        .ext_comp_byte_addr(ext_dec_comp_byte_addr),
+        .ext_comp_byte_dout(ext_dec_comp_byte_dout)
     );
 
     generate

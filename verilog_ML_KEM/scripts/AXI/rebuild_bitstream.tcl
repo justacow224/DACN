@@ -42,9 +42,13 @@ if {[string first "write_bitstream Complete" $status] < 0} {
     exit 2
 }
 
-# Verify the stage_d1_reg fix took effect
+# Verify the stage_d1_reg fix took effect.
+# Note: pattern dropped the leading `u_` so it matches both the legacy
+# per-module instance (`u_inv_ntt/stage_d1_reg*`) and the Step 3.1 lifted
+# shared instance (`u_shared_inv_ntt/stage_d1_reg*`). Either form indicates
+# dont_touch is preserving the pipeline registers through impl.
 open_run impl_1
-set survivors [get_cells -hier -filter {NAME =~ *u_inv_ntt*stage_d1_reg*}]
+set survivors [get_cells -hier -filter {NAME =~ *inv_ntt*stage_d1_reg*}]
 puts "INFO: surviving stage_d1 registers: [llength $survivors]"
 foreach c $survivors {
     puts "  - $c"

@@ -172,8 +172,12 @@ module ml_kem_top #
     wire [9:0]  dk_rd_addr;
     wire [31:0] dk_rd_data;
 
-    reg [7:0] m_mem  [0:31];
-    reg [7:0] ss_mem [0:31];
+    // Step 3 cleanup: m_mem and ss_mem flat 256-bit registers (was 32×8 byte
+    // arrays which dissolved into FF anyway and triggered Synth 8-4767 +
+    // 32× 8-7137 set/reset-priority warnings due to byte-array inference
+    // collisions). Same FF count (256), but cleaner mux logic and no warnings.
+    reg [255:0] m_mem;
+    reg [255:0] ss_mem;
 
     xpm_ram_sdp_word_bs #(.ADDR_WIDTH(9),  .DEPTH(512),  .READ_LATENCY(1)) u_pk_mem (
         .clk(clk), .wr_be(pk_wea), .wr_addr(pk_waddr), .wr_data(pk_wdata),
@@ -326,6 +330,62 @@ module ml_kem_top #
     wire [10:0] dec_ext_enc_in_addr;
     wire [7:0]  dec_ext_enc_in_wdata;
 
+    // Shared encrypt/decrypt poly-engine signals (Step 3.1). The lifted
+    // kpke_encrypt and the decaps decrypt path are time-exclusive at top level.
+    wire        kpke_enc_fromb_start, kpke_enc_fromb_done, kpke_enc_fromb_coeff_we;
+    wire [8:0]  kpke_enc_fromb_byte_addr;
+    wire [7:0]  kpke_enc_fromb_byte_din;
+    wire [6:0]  kpke_enc_fromb_coeff_addr;
+    wire [15:0] kpke_enc_fromb_coeff_a0, kpke_enc_fromb_coeff_a1;
+    wire        dec_poly_fromb_start, dec_poly_fromb_done, dec_poly_fromb_coeff_we;
+    wire [8:0]  dec_poly_fromb_byte_addr;
+    wire [7:0]  dec_poly_fromb_byte_din;
+    wire [6:0]  dec_poly_fromb_coeff_addr;
+    wire [15:0] dec_poly_fromb_coeff_a0, dec_poly_fromb_coeff_a1;
+
+    wire        kpke_enc_ntt_start, kpke_enc_ntt_done, kpke_enc_ntt_host_we;
+    wire [7:0]  kpke_enc_ntt_host_addr;
+    wire [15:0] kpke_enc_ntt_host_din, kpke_enc_ntt_host_dout;
+    wire        dec_poly_ntt_start, dec_poly_ntt_done, dec_poly_ntt_host_we;
+    wire [7:0]  dec_poly_ntt_host_addr;
+    wire [15:0] dec_poly_ntt_host_din, dec_poly_ntt_host_dout;
+
+    wire        kpke_enc_intt_start, kpke_enc_intt_done, kpke_enc_intt_host_we;
+    wire [7:0]  kpke_enc_intt_host_addr;
+    wire [15:0] kpke_enc_intt_host_din, kpke_enc_intt_host_dout;
+    wire        dec_poly_intt_start, dec_poly_intt_done, dec_poly_intt_host_we;
+    wire [7:0]  dec_poly_intt_host_addr;
+    wire [15:0] dec_poly_intt_host_din, dec_poly_intt_host_dout;
+
+    wire        kpke_enc_pw_start, kpke_enc_pw_done, kpke_enc_pw_host_sel, kpke_enc_pw_host_we;
+    wire [7:0]  kpke_enc_pw_host_addr;
+    wire [15:0] kpke_enc_pw_host_din, kpke_enc_pw_host_dout;
+    wire        dec_poly_pw_start, dec_poly_pw_done, dec_poly_pw_host_sel, dec_poly_pw_host_we;
+    wire [7:0]  dec_poly_pw_host_addr;
+    wire [15:0] dec_poly_pw_host_din, dec_poly_pw_host_dout;
+
+    wire        kpke_enc_add_start, kpke_enc_add_is_sub, kpke_enc_add_done;
+    wire        kpke_enc_add_host_sel, kpke_enc_add_host_we;
+    wire [7:0]  kpke_enc_add_host_addr;
+    wire [15:0] kpke_enc_add_host_din, kpke_enc_add_host_dout;
+    wire        dec_poly_add_start, dec_poly_add_is_sub, dec_poly_add_done;
+    wire        dec_poly_add_host_sel, dec_poly_add_host_we;
+    wire [7:0]  dec_poly_add_host_addr;
+    wire [15:0] dec_poly_add_host_din, dec_poly_add_host_dout;
+
+    wire        kpke_enc_comp_start, kpke_enc_comp_done, kpke_enc_comp_byte_we;
+    wire [1:0]  kpke_enc_comp_d_sel;
+    wire [6:0]  kpke_enc_comp_coeff_addr;
+    wire [15:0] kpke_enc_comp_coeff_a0, kpke_enc_comp_coeff_a1;
+    wire [8:0]  kpke_enc_comp_byte_addr;
+    wire [7:0]  kpke_enc_comp_byte_dout;
+    wire        dec_poly_comp_start, dec_poly_comp_done, dec_poly_comp_byte_we;
+    wire [1:0]  dec_poly_comp_d_sel;
+    wire [6:0]  dec_poly_comp_coeff_addr;
+    wire [15:0] dec_poly_comp_coeff_a0, dec_poly_comp_coeff_a1;
+    wire [8:0]  dec_poly_comp_byte_addr;
+    wire [7:0]  dec_poly_comp_byte_dout;
+
     wire [1:0]  k_owner = op_sel_latched;
 
     // The shared kpke_encrypt instance preempts the op_sel MUX whenever it is
@@ -408,7 +468,8 @@ module ml_kem_top #
 
     // Lifted shared kpke_encrypt instance.
     kpke_encrypt #(
-        .HAS_INTERNAL_KECCAK(0)
+        .HAS_INTERNAL_KECCAK(0),
+        .HAS_INTERNAL_POLY(0)
     ) u_kpke_encrypt (
         .clk(clk),
         .rst_n(rst_n),
@@ -434,8 +495,222 @@ module ml_kem_top #
         .ext_k_din_ready(kpke_enc_k_din_ready),
         .ext_k_dout(kpke_enc_k_dout),
         .ext_k_dout_valid(kpke_enc_k_dout_valid),
-        .ext_k_dout_ready(kpke_enc_k_dout_ready)
+        .ext_k_dout_ready(kpke_enc_k_dout_ready),
+        .ext_fromb_start(kpke_enc_fromb_start),
+        .ext_fromb_done(kpke_enc_fromb_done),
+        .ext_fromb_byte_addr(kpke_enc_fromb_byte_addr),
+        .ext_fromb_byte_din(kpke_enc_fromb_byte_din),
+        .ext_fromb_coeff_we(kpke_enc_fromb_coeff_we),
+        .ext_fromb_coeff_addr(kpke_enc_fromb_coeff_addr),
+        .ext_fromb_coeff_a0(kpke_enc_fromb_coeff_a0),
+        .ext_fromb_coeff_a1(kpke_enc_fromb_coeff_a1),
+        .ext_ntt_start(kpke_enc_ntt_start),
+        .ext_ntt_done(kpke_enc_ntt_done),
+        .ext_ntt_host_we(kpke_enc_ntt_host_we),
+        .ext_ntt_host_addr(kpke_enc_ntt_host_addr),
+        .ext_ntt_host_din(kpke_enc_ntt_host_din),
+        .ext_ntt_host_dout(kpke_enc_ntt_host_dout),
+        .ext_intt_start(kpke_enc_intt_start),
+        .ext_intt_done(kpke_enc_intt_done),
+        .ext_intt_host_we(kpke_enc_intt_host_we),
+        .ext_intt_host_addr(kpke_enc_intt_host_addr),
+        .ext_intt_host_din(kpke_enc_intt_host_din),
+        .ext_intt_host_dout(kpke_enc_intt_host_dout),
+        .ext_pw_start(kpke_enc_pw_start),
+        .ext_pw_done(kpke_enc_pw_done),
+        .ext_pw_host_sel(kpke_enc_pw_host_sel),
+        .ext_pw_host_we(kpke_enc_pw_host_we),
+        .ext_pw_host_addr(kpke_enc_pw_host_addr),
+        .ext_pw_host_din(kpke_enc_pw_host_din),
+        .ext_pw_host_dout(kpke_enc_pw_host_dout),
+        .ext_add_start(kpke_enc_add_start),
+        .ext_add_is_sub(kpke_enc_add_is_sub),
+        .ext_add_done(kpke_enc_add_done),
+        .ext_add_host_sel(kpke_enc_add_host_sel),
+        .ext_add_host_we(kpke_enc_add_host_we),
+        .ext_add_host_addr(kpke_enc_add_host_addr),
+        .ext_add_host_din(kpke_enc_add_host_din),
+        .ext_add_host_dout(kpke_enc_add_host_dout),
+        .ext_comp_start(kpke_enc_comp_start),
+        .ext_comp_d_sel(kpke_enc_comp_d_sel),
+        .ext_comp_done(kpke_enc_comp_done),
+        .ext_comp_coeff_addr(kpke_enc_comp_coeff_addr),
+        .ext_comp_coeff_a0(kpke_enc_comp_coeff_a0),
+        .ext_comp_coeff_a1(kpke_enc_comp_coeff_a1),
+        .ext_comp_byte_we(kpke_enc_comp_byte_we),
+        .ext_comp_byte_addr(kpke_enc_comp_byte_addr),
+        .ext_comp_byte_dout(kpke_enc_comp_byte_dout)
     );
+
+    wire poly_owner_enc = kpke_enc_busy || kpke_enc_start;
+    wire poly_owner_dec = !poly_owner_enc && (k_owner == OP_DECAPS) && dec_busy;
+
+    wire        shared_fromb_done, shared_fromb_coeff_we;
+    wire [8:0]  shared_fromb_byte_addr;
+    wire [6:0]  shared_fromb_coeff_addr;
+    wire [15:0] shared_fromb_coeff_a0, shared_fromb_coeff_a1;
+
+    poly_frombytes u_shared_frombytes (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(poly_owner_enc ? kpke_enc_fromb_start :
+               poly_owner_dec ? dec_poly_fromb_start : 1'b0),
+        .done(shared_fromb_done),
+        .byte_addr(shared_fromb_byte_addr),
+        .byte_din(poly_owner_enc ? kpke_enc_fromb_byte_din :
+                  poly_owner_dec ? dec_poly_fromb_byte_din : 8'd0),
+        .coeff_we(shared_fromb_coeff_we),
+        .coeff_addr(shared_fromb_coeff_addr),
+        .coeff_a0(shared_fromb_coeff_a0),
+        .coeff_a1(shared_fromb_coeff_a1)
+    );
+
+    assign kpke_enc_fromb_done       = poly_owner_enc ? shared_fromb_done       : 1'b0;
+    assign kpke_enc_fromb_byte_addr  = poly_owner_enc ? shared_fromb_byte_addr  : 9'd0;
+    assign kpke_enc_fromb_coeff_we   = poly_owner_enc ? shared_fromb_coeff_we   : 1'b0;
+    assign kpke_enc_fromb_coeff_addr = poly_owner_enc ? shared_fromb_coeff_addr : 7'd0;
+    assign kpke_enc_fromb_coeff_a0   = poly_owner_enc ? shared_fromb_coeff_a0   : 16'd0;
+    assign kpke_enc_fromb_coeff_a1   = poly_owner_enc ? shared_fromb_coeff_a1   : 16'd0;
+
+    assign dec_poly_fromb_done       = poly_owner_dec ? shared_fromb_done       : 1'b0;
+    assign dec_poly_fromb_byte_addr  = poly_owner_dec ? shared_fromb_byte_addr  : 9'd0;
+    assign dec_poly_fromb_coeff_we   = poly_owner_dec ? shared_fromb_coeff_we   : 1'b0;
+    assign dec_poly_fromb_coeff_addr = poly_owner_dec ? shared_fromb_coeff_addr : 7'd0;
+    assign dec_poly_fromb_coeff_a0   = poly_owner_dec ? shared_fromb_coeff_a0   : 16'd0;
+    assign dec_poly_fromb_coeff_a1   = poly_owner_dec ? shared_fromb_coeff_a1   : 16'd0;
+
+    wire        shared_ntt_done;
+    wire [15:0] shared_ntt_host_dout;
+
+    ntt_top u_shared_ntt (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(poly_owner_enc ? kpke_enc_ntt_start :
+               poly_owner_dec ? dec_poly_ntt_start : 1'b0),
+        .done(shared_ntt_done),
+        .host_we(poly_owner_enc ? kpke_enc_ntt_host_we :
+                 poly_owner_dec ? dec_poly_ntt_host_we : 1'b0),
+        .host_addr(poly_owner_enc ? kpke_enc_ntt_host_addr :
+                   poly_owner_dec ? dec_poly_ntt_host_addr : 8'd0),
+        .host_din(poly_owner_enc ? kpke_enc_ntt_host_din :
+                  poly_owner_dec ? dec_poly_ntt_host_din : 16'd0),
+        .host_dout(shared_ntt_host_dout)
+    );
+
+    assign kpke_enc_ntt_done      = poly_owner_enc ? shared_ntt_done      : 1'b0;
+    assign kpke_enc_ntt_host_dout = poly_owner_enc ? shared_ntt_host_dout : 16'd0;
+    assign dec_poly_ntt_done      = poly_owner_dec ? shared_ntt_done      : 1'b0;
+    assign dec_poly_ntt_host_dout = poly_owner_dec ? shared_ntt_host_dout : 16'd0;
+
+    wire        shared_intt_done;
+    wire [15:0] shared_intt_host_dout;
+
+    inv_ntt_top u_shared_inv_ntt (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(poly_owner_enc ? kpke_enc_intt_start :
+               poly_owner_dec ? dec_poly_intt_start : 1'b0),
+        .done(shared_intt_done),
+        .host_we(poly_owner_enc ? kpke_enc_intt_host_we :
+                 poly_owner_dec ? dec_poly_intt_host_we : 1'b0),
+        .host_addr(poly_owner_enc ? kpke_enc_intt_host_addr :
+                   poly_owner_dec ? dec_poly_intt_host_addr : 8'd0),
+        .host_din(poly_owner_enc ? kpke_enc_intt_host_din :
+                  poly_owner_dec ? dec_poly_intt_host_din : 16'd0),
+        .host_dout(shared_intt_host_dout)
+    );
+
+    assign kpke_enc_intt_done      = poly_owner_enc ? shared_intt_done      : 1'b0;
+    assign kpke_enc_intt_host_dout = poly_owner_enc ? shared_intt_host_dout : 16'd0;
+    assign dec_poly_intt_done      = poly_owner_dec ? shared_intt_done      : 1'b0;
+    assign dec_poly_intt_host_dout = poly_owner_dec ? shared_intt_host_dout : 16'd0;
+
+    wire        shared_pw_done;
+    wire [15:0] shared_pw_host_dout;
+
+    poly_pointwise_top u_shared_pw (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(poly_owner_enc ? kpke_enc_pw_start :
+               poly_owner_dec ? dec_poly_pw_start : 1'b0),
+        .done(shared_pw_done),
+        .host_sel(poly_owner_enc ? kpke_enc_pw_host_sel :
+                  poly_owner_dec ? dec_poly_pw_host_sel : 1'b0),
+        .host_we(poly_owner_enc ? kpke_enc_pw_host_we :
+                 poly_owner_dec ? dec_poly_pw_host_we : 1'b0),
+        .host_addr(poly_owner_enc ? kpke_enc_pw_host_addr :
+                   poly_owner_dec ? dec_poly_pw_host_addr : 8'd0),
+        .host_din(poly_owner_enc ? kpke_enc_pw_host_din :
+                  poly_owner_dec ? dec_poly_pw_host_din : 16'd0),
+        .host_dout(shared_pw_host_dout)
+    );
+
+    assign kpke_enc_pw_done      = poly_owner_enc ? shared_pw_done      : 1'b0;
+    assign kpke_enc_pw_host_dout = poly_owner_enc ? shared_pw_host_dout : 16'd0;
+    assign dec_poly_pw_done      = poly_owner_dec ? shared_pw_done      : 1'b0;
+    assign dec_poly_pw_host_dout = poly_owner_dec ? shared_pw_host_dout : 16'd0;
+
+    wire        shared_add_done;
+    wire [15:0] shared_add_host_dout;
+
+    poly_add_sub_top u_shared_add (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(poly_owner_enc ? kpke_enc_add_start :
+               poly_owner_dec ? dec_poly_add_start : 1'b0),
+        .is_sub(poly_owner_enc ? kpke_enc_add_is_sub :
+                poly_owner_dec ? dec_poly_add_is_sub : 1'b0),
+        .done(shared_add_done),
+        .host_sel(poly_owner_enc ? kpke_enc_add_host_sel :
+                  poly_owner_dec ? dec_poly_add_host_sel : 1'b0),
+        .host_we(poly_owner_enc ? kpke_enc_add_host_we :
+                 poly_owner_dec ? dec_poly_add_host_we : 1'b0),
+        .host_addr(poly_owner_enc ? kpke_enc_add_host_addr :
+                   poly_owner_dec ? dec_poly_add_host_addr : 8'd0),
+        .host_din(poly_owner_enc ? kpke_enc_add_host_din :
+                  poly_owner_dec ? dec_poly_add_host_din : 16'd0),
+        .host_dout(shared_add_host_dout)
+    );
+
+    assign kpke_enc_add_done      = poly_owner_enc ? shared_add_done      : 1'b0;
+    assign kpke_enc_add_host_dout = poly_owner_enc ? shared_add_host_dout : 16'd0;
+    assign dec_poly_add_done      = poly_owner_dec ? shared_add_done      : 1'b0;
+    assign dec_poly_add_host_dout = poly_owner_dec ? shared_add_host_dout : 16'd0;
+
+    wire        shared_comp_done, shared_comp_byte_we;
+    wire [6:0]  shared_comp_coeff_addr;
+    wire [8:0]  shared_comp_byte_addr;
+    wire [7:0]  shared_comp_byte_dout;
+
+    poly_compress u_shared_compress (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(poly_owner_enc ? kpke_enc_comp_start :
+               poly_owner_dec ? dec_poly_comp_start : 1'b0),
+        .d_sel(poly_owner_enc ? kpke_enc_comp_d_sel :
+               poly_owner_dec ? dec_poly_comp_d_sel : 2'b00),
+        .done(shared_comp_done),
+        .coeff_addr(shared_comp_coeff_addr),
+        .coeff_a0(poly_owner_enc ? kpke_enc_comp_coeff_a0 :
+                  poly_owner_dec ? dec_poly_comp_coeff_a0 : 16'd0),
+        .coeff_a1(poly_owner_enc ? kpke_enc_comp_coeff_a1 :
+                  poly_owner_dec ? dec_poly_comp_coeff_a1 : 16'd0),
+        .byte_we(shared_comp_byte_we),
+        .byte_addr(shared_comp_byte_addr),
+        .byte_dout(shared_comp_byte_dout)
+    );
+
+    assign kpke_enc_comp_done       = poly_owner_enc ? shared_comp_done       : 1'b0;
+    assign kpke_enc_comp_coeff_addr = poly_owner_enc ? shared_comp_coeff_addr : 7'd0;
+    assign kpke_enc_comp_byte_we    = poly_owner_enc ? shared_comp_byte_we    : 1'b0;
+    assign kpke_enc_comp_byte_addr  = poly_owner_enc ? shared_comp_byte_addr  : 9'd0;
+    assign kpke_enc_comp_byte_dout  = poly_owner_enc ? shared_comp_byte_dout  : 8'd0;
+
+    assign dec_poly_comp_done       = poly_owner_dec ? shared_comp_done       : 1'b0;
+    assign dec_poly_comp_coeff_addr = poly_owner_dec ? shared_comp_coeff_addr : 7'd0;
+    assign dec_poly_comp_byte_we    = poly_owner_dec ? shared_comp_byte_we    : 1'b0;
+    assign dec_poly_comp_byte_addr  = poly_owner_dec ? shared_comp_byte_addr  : 9'd0;
+    assign dec_poly_comp_byte_dout  = poly_owner_dec ? shared_comp_byte_dout  : 8'd0;
 
     integer i;
 
@@ -536,10 +811,11 @@ module ml_kem_top #
     // ally from the small reg arrays; for BRAM-backed buffers we use rd_data
     // (valid 1 cycle after S_MM_WR_FETCH, which is S_MM_WR_W).
     wire [11:0] m_wi_x4 = mm_word_idx * 12'd4;
-    wire [31:0] m_word  = {m_mem[m_wi_x4 + 12'd3], m_mem[m_wi_x4 + 12'd2],
-                           m_mem[m_wi_x4 + 12'd1], m_mem[m_wi_x4]};
-    wire [31:0] ss_word = {ss_mem[m_wi_x4 + 12'd3], ss_mem[m_wi_x4 + 12'd2],
-                           ss_mem[m_wi_x4 + 12'd1], ss_mem[m_wi_x4]};
+    // Flat-reg refactor: 4-byte little-endian word = 32-bit slice starting at
+    // bit (m_wi_x4 * 8). Bit 0 holds byte 0, bit 31 holds byte 3, matching the
+    // original concat order.
+    wire [31:0] m_word  = m_mem [m_wi_x4*8 +: 32];
+    wire [31:0] ss_word = ss_mem[m_wi_x4*8 +: 32];
 
     wire [31:0] write_word_comb = (mm_buf_sel == BUF_PK) ? pk_rd_data :
                                   (mm_buf_sel == BUF_SK) ? sk_rd_data :
@@ -676,7 +952,8 @@ module ml_kem_top #
 
             ml_kem_decaps #(
                 .HAS_INTERNAL_KECCAK(0),
-                .HAS_INTERNAL_ENCRYPT(0)
+                .HAS_INTERNAL_ENCRYPT(0),
+                .HAS_INTERNAL_POLY(0)
             ) u_decaps (
                 .clk(clk),
                 .rst_n(rst_n),
@@ -711,7 +988,51 @@ module ml_kem_top #
                 .ext_enc_done     ((k_owner == OP_DECAPS) ? kpke_enc_done    : 1'b0),
                 .ext_enc_ct_we    ((k_owner == OP_DECAPS) ? kpke_enc_ct_we   : 1'b0),
                 .ext_enc_ct_addr  ((k_owner == OP_DECAPS) ? kpke_enc_ct_addr : 11'd0),
-                .ext_enc_ct_dout  ((k_owner == OP_DECAPS) ? kpke_enc_ct_dout : 8'd0)
+                .ext_enc_ct_dout  ((k_owner == OP_DECAPS) ? kpke_enc_ct_dout : 8'd0),
+                .ext_dec_fromb_start(dec_poly_fromb_start),
+                .ext_dec_fromb_done(dec_poly_fromb_done),
+                .ext_dec_fromb_byte_addr(dec_poly_fromb_byte_addr),
+                .ext_dec_fromb_byte_din(dec_poly_fromb_byte_din),
+                .ext_dec_fromb_coeff_we(dec_poly_fromb_coeff_we),
+                .ext_dec_fromb_coeff_addr(dec_poly_fromb_coeff_addr),
+                .ext_dec_fromb_coeff_a0(dec_poly_fromb_coeff_a0),
+                .ext_dec_fromb_coeff_a1(dec_poly_fromb_coeff_a1),
+                .ext_dec_ntt_start(dec_poly_ntt_start),
+                .ext_dec_ntt_done(dec_poly_ntt_done),
+                .ext_dec_ntt_host_we(dec_poly_ntt_host_we),
+                .ext_dec_ntt_host_addr(dec_poly_ntt_host_addr),
+                .ext_dec_ntt_host_din(dec_poly_ntt_host_din),
+                .ext_dec_ntt_host_dout(dec_poly_ntt_host_dout),
+                .ext_dec_intt_start(dec_poly_intt_start),
+                .ext_dec_intt_done(dec_poly_intt_done),
+                .ext_dec_intt_host_we(dec_poly_intt_host_we),
+                .ext_dec_intt_host_addr(dec_poly_intt_host_addr),
+                .ext_dec_intt_host_din(dec_poly_intt_host_din),
+                .ext_dec_intt_host_dout(dec_poly_intt_host_dout),
+                .ext_dec_pw_start(dec_poly_pw_start),
+                .ext_dec_pw_done(dec_poly_pw_done),
+                .ext_dec_pw_host_sel(dec_poly_pw_host_sel),
+                .ext_dec_pw_host_we(dec_poly_pw_host_we),
+                .ext_dec_pw_host_addr(dec_poly_pw_host_addr),
+                .ext_dec_pw_host_din(dec_poly_pw_host_din),
+                .ext_dec_pw_host_dout(dec_poly_pw_host_dout),
+                .ext_dec_add_start(dec_poly_add_start),
+                .ext_dec_add_is_sub(dec_poly_add_is_sub),
+                .ext_dec_add_done(dec_poly_add_done),
+                .ext_dec_add_host_sel(dec_poly_add_host_sel),
+                .ext_dec_add_host_we(dec_poly_add_host_we),
+                .ext_dec_add_host_addr(dec_poly_add_host_addr),
+                .ext_dec_add_host_din(dec_poly_add_host_din),
+                .ext_dec_add_host_dout(dec_poly_add_host_dout),
+                .ext_dec_comp_start(dec_poly_comp_start),
+                .ext_dec_comp_d_sel(dec_poly_comp_d_sel),
+                .ext_dec_comp_done(dec_poly_comp_done),
+                .ext_dec_comp_coeff_addr(dec_poly_comp_coeff_addr),
+                .ext_dec_comp_coeff_a0(dec_poly_comp_coeff_a0),
+                .ext_dec_comp_coeff_a1(dec_poly_comp_coeff_a1),
+                .ext_dec_comp_byte_we(dec_poly_comp_byte_we),
+                .ext_dec_comp_byte_addr(dec_poly_comp_byte_addr),
+                .ext_dec_comp_byte_dout(dec_poly_comp_byte_dout)
             );
         end else begin : g_crypto_bypass
             assign keygen_done   = 1'b0;
@@ -849,7 +1170,7 @@ module ml_kem_top #
                             end
                             OP_DECAPS: begin
                                 if (BYPASS_CRYPTO != 0) begin
-                                    for (i = 0; i < 32; i = i + 1) ss_mem[i] <= i[7:0] + 8'h33;
+                                    for (i = 0; i < 32; i = i + 1) ss_mem[i*8 +: 8] <= i[7:0] + 8'h33;
                                     state <= S_WRITE_SS;
                                     mm_buf_sel <= BUF_SS;
                                     mm_base_addr <= cfg_ss_addr;
@@ -927,7 +1248,7 @@ module ml_kem_top #
                     enc_in_we    <= 1'b1;
                     enc_in_sel   <= 1'b1;
                     enc_in_waddr <= byte_idx[10:0];
-                    enc_in_wdata <= m_mem[byte_idx[4:0]];
+                    enc_in_wdata <= m_mem[byte_idx[4:0]*8 +: 8];
                     if (byte_idx == 12'd31) begin
                         byte_idx <= 12'd0;
                         state <= S_ENCAPS_START;
@@ -1013,7 +1334,7 @@ module ml_kem_top #
 
                 S_CAPTURE_SS: begin
                     if (op_sel_latched == OP_ENCAPS) begin
-                        for (i = 0; i < 32; i = i + 1) ss_mem[i] <= enc_ss_out[i*8 +: 8];
+                        ss_mem <= enc_ss_out;
                         mm_buf_sel <= BUF_CT;
                         mm_base_addr <= cfg_ct_addr;
                         mm_word_total <= 12'd272;
@@ -1021,7 +1342,7 @@ module ml_kem_top #
                         ret_state_after_mm <= S_WRITE_SS;
                         state <= S_WRITE_CT;
                     end else begin
-                        for (i = 0; i < 32; i = i + 1) ss_mem[i] <= dec_ss_out[i*8 +: 8];
+                        ss_mem <= dec_ss_out;
                         mm_buf_sel <= BUF_SS;
                         mm_base_addr <= cfg_ss_addr;
                         mm_word_total <= 12'd8;
@@ -1172,7 +1493,7 @@ module ml_kem_top #
 
                 S_BYPASS_FILL_CT: begin
                     if (mm_word_idx == 12'd271) begin
-                        for (i = 0; i < 32; i = i + 1) ss_mem[i] <= i[7:0] + 8'h77;
+                        for (i = 0; i < 32; i = i + 1) ss_mem[i*8 +: 8] <= i[7:0] + 8'h77;
                         mm_buf_sel <= BUF_CT;
                         mm_base_addr <= cfg_ct_addr;
                         mm_word_total <= 12'd272;
@@ -1213,16 +1534,14 @@ module ml_kem_top #
         end
     end
 
-    // BUF_M: AXI-MM RDATA writes into the small reg array (parallel 4-byte write
-    // in a single cycle since m_mem is distributed storage). Kept separate from
-    // the BRAM mux for clarity.
+    // BUF_M: AXI-MM RDATA writes a 32-bit word into the flat m_mem register
+    // at the byte-aligned slice (mm_word_idx*4)*8. Equivalent to the previous
+    // 4 individual byte writes; flat reg form eliminates the Synth 8-4767
+    // dissolve warning that the byte-array form triggered.
     always @(posedge clk) begin
         if ((state == S_MM_RD_R) && m_axi_rvalid && m_axi_rready
             && (m_axi_rresp == 2'b00) && (mm_buf_sel == BUF_M)) begin
-            m_mem[mm_word_idx*4]         <= m_axi_rdata[7:0];
-            m_mem[mm_word_idx*4 + 12'd1] <= m_axi_rdata[15:8];
-            m_mem[mm_word_idx*4 + 12'd2] <= m_axi_rdata[23:16];
-            m_mem[mm_word_idx*4 + 12'd3] <= m_axi_rdata[31:24];
+            m_mem[(mm_word_idx*4)*8 +: 32] <= m_axi_rdata;
         end
     end
 

@@ -1,7 +1,8 @@
 `timescale 1ns / 1ps
 
 module kpke_encrypt #(
-    parameter HAS_INTERNAL_KECCAK = 1
+    parameter HAS_INTERNAL_KECCAK = 1,
+    parameter HAS_INTERNAL_POLY   = 1
 ) (
     input  wire         clk,
     input  wire         rst_n,
@@ -38,7 +39,58 @@ module kpke_encrypt #(
     input  wire         ext_k_din_ready,
     input  wire [7:0]   ext_k_dout,
     input  wire         ext_k_dout_valid,
-    output wire         ext_k_dout_ready
+    output wire         ext_k_dout_ready,
+
+    // External shared poly-engine interface, used only when HAS_INTERNAL_POLY == 0.
+    output wire         ext_fromb_start,
+    input  wire         ext_fromb_done,
+    input  wire [8:0]   ext_fromb_byte_addr,
+    output wire [7:0]   ext_fromb_byte_din,
+    input  wire         ext_fromb_coeff_we,
+    input  wire [6:0]   ext_fromb_coeff_addr,
+    input  wire [15:0]  ext_fromb_coeff_a0,
+    input  wire [15:0]  ext_fromb_coeff_a1,
+
+    output wire         ext_ntt_start,
+    input  wire         ext_ntt_done,
+    output wire         ext_ntt_host_we,
+    output wire [7:0]   ext_ntt_host_addr,
+    output wire [15:0]  ext_ntt_host_din,
+    input  wire [15:0]  ext_ntt_host_dout,
+
+    output wire         ext_intt_start,
+    input  wire         ext_intt_done,
+    output wire         ext_intt_host_we,
+    output wire [7:0]   ext_intt_host_addr,
+    output wire [15:0]  ext_intt_host_din,
+    input  wire [15:0]  ext_intt_host_dout,
+
+    output wire         ext_pw_start,
+    input  wire         ext_pw_done,
+    output wire         ext_pw_host_sel,
+    output wire         ext_pw_host_we,
+    output wire [7:0]   ext_pw_host_addr,
+    output wire [15:0]  ext_pw_host_din,
+    input  wire [15:0]  ext_pw_host_dout,
+
+    output wire         ext_add_start,
+    output wire         ext_add_is_sub,
+    input  wire         ext_add_done,
+    output wire         ext_add_host_sel,
+    output wire         ext_add_host_we,
+    output wire [7:0]   ext_add_host_addr,
+    output wire [15:0]  ext_add_host_din,
+    input  wire [15:0]  ext_add_host_dout,
+
+    output wire         ext_comp_start,
+    output wire [1:0]   ext_comp_d_sel,
+    input  wire         ext_comp_done,
+    input  wire [6:0]   ext_comp_coeff_addr,
+    output wire [15:0]  ext_comp_coeff_a0,
+    output wire [15:0]  ext_comp_coeff_a1,
+    input  wire         ext_comp_byte_we,
+    input  wire [8:0]   ext_comp_byte_addr,
+    input  wire [7:0]   ext_comp_byte_dout
 );
 
     // =============================================================
@@ -363,18 +415,35 @@ module kpke_encrypt #(
     assign fromb_start = (state == S_DECODE_EK_START);
     assign fromb_byte_din = fromb_byte_din_r;
 
-    poly_frombytes u_frombytes (
-        .clk(clk),
-        .rst_n(rst_n),
-        .start(fromb_start),
-        .done(fromb_done),
-        .byte_addr(fromb_byte_addr),
-        .byte_din(fromb_byte_din),
-        .coeff_we(fromb_coeff_we),
-        .coeff_addr(fromb_coeff_addr),
-        .coeff_a0(fromb_coeff_a0),
-        .coeff_a1(fromb_coeff_a1)
-    );
+    generate
+        if (HAS_INTERNAL_POLY) begin : gen_int_frombytes
+            poly_frombytes u_frombytes (
+                .clk(clk),
+                .rst_n(rst_n),
+                .start(fromb_start),
+                .done(fromb_done),
+                .byte_addr(fromb_byte_addr),
+                .byte_din(fromb_byte_din),
+                .coeff_we(fromb_coeff_we),
+                .coeff_addr(fromb_coeff_addr),
+                .coeff_a0(fromb_coeff_a0),
+                .coeff_a1(fromb_coeff_a1)
+            );
+
+            assign ext_fromb_start    = 1'b0;
+            assign ext_fromb_byte_din = 8'd0;
+        end else begin : gen_ext_frombytes
+            assign ext_fromb_start    = fromb_start;
+            assign ext_fromb_byte_din = fromb_byte_din;
+
+            assign fromb_done       = ext_fromb_done;
+            assign fromb_byte_addr  = ext_fromb_byte_addr;
+            assign fromb_coeff_we   = ext_fromb_coeff_we;
+            assign fromb_coeff_addr = ext_fromb_coeff_addr;
+            assign fromb_coeff_a0   = ext_fromb_coeff_a0;
+            assign fromb_coeff_a1   = ext_fromb_coeff_a1;
+        end
+    endgenerate
 
     // =============================================================
     // 2) keccak
@@ -486,16 +555,33 @@ module kpke_encrypt #(
     assign ntt_host_addr = ((state == S_NTT_LOAD_LOOP) || (state == S_NTT_READ_REQ)) ? coeff_idx : 8'd0;
     assign ntt_host_din  = tmp_rdata;
 
-    ntt_top u_ntt (
-        .clk(clk),
-        .rst_n(rst_n),
-        .start(ntt_start),
-        .done(ntt_done),
-        .host_we(ntt_host_we),
-        .host_addr(ntt_host_addr),
-        .host_din(ntt_host_din),
-        .host_dout(ntt_host_dout)
-    );
+    generate
+        if (HAS_INTERNAL_POLY) begin : gen_int_ntt
+            ntt_top u_ntt (
+                .clk(clk),
+                .rst_n(rst_n),
+                .start(ntt_start),
+                .done(ntt_done),
+                .host_we(ntt_host_we),
+                .host_addr(ntt_host_addr),
+                .host_din(ntt_host_din),
+                .host_dout(ntt_host_dout)
+            );
+
+            assign ext_ntt_start     = 1'b0;
+            assign ext_ntt_host_we   = 1'b0;
+            assign ext_ntt_host_addr = 8'd0;
+            assign ext_ntt_host_din  = 16'd0;
+        end else begin : gen_ext_ntt
+            assign ext_ntt_start     = ntt_start;
+            assign ext_ntt_host_we   = ntt_host_we;
+            assign ext_ntt_host_addr = ntt_host_addr;
+            assign ext_ntt_host_din  = ntt_host_din;
+
+            assign ntt_done      = ext_ntt_done;
+            assign ntt_host_dout = ext_ntt_host_dout;
+        end
+    endgenerate
 
     // =============================================================
     // 5) inv_ntt_top
@@ -515,16 +601,33 @@ module kpke_encrypt #(
                              (state == S_V_INTT_READ_REQ)) ? coeff_idx : 8'd0;
     assign intt_host_din = acc_rdata;
 
-    inv_ntt_top u_inv_ntt (
-        .clk(clk),
-        .rst_n(rst_n),
-        .start(intt_start),
-        .done(intt_done),
-        .host_we(intt_host_we),
-        .host_addr(intt_host_addr),
-        .host_din(intt_host_din),
-        .host_dout(intt_host_dout)
-    );
+    generate
+        if (HAS_INTERNAL_POLY) begin : gen_int_inv_ntt
+            inv_ntt_top u_inv_ntt (
+                .clk(clk),
+                .rst_n(rst_n),
+                .start(intt_start),
+                .done(intt_done),
+                .host_we(intt_host_we),
+                .host_addr(intt_host_addr),
+                .host_din(intt_host_din),
+                .host_dout(intt_host_dout)
+            );
+
+            assign ext_intt_start     = 1'b0;
+            assign ext_intt_host_we   = 1'b0;
+            assign ext_intt_host_addr = 8'd0;
+            assign ext_intt_host_din  = 16'd0;
+        end else begin : gen_ext_inv_ntt
+            assign ext_intt_start     = intt_start;
+            assign ext_intt_host_we   = intt_host_we;
+            assign ext_intt_host_addr = intt_host_addr;
+            assign ext_intt_host_din  = intt_host_din;
+
+            assign intt_done      = ext_intt_done;
+            assign intt_host_dout = ext_intt_host_dout;
+        end
+    endgenerate
 
     // =============================================================
     // 6) poly_parse_inline_top
@@ -577,17 +680,36 @@ module kpke_encrypt #(
                          (state == S_V_PW_LOAD_B_LOOP) ? r_hat_rdata :
                          16'd0;
 
-    poly_pointwise_top u_pw (
-        .clk(clk),
-        .rst_n(rst_n),
-        .start(pw_start),
-        .done(pw_done),
-        .host_sel(pw_host_sel),
-        .host_we(pw_host_we),
-        .host_addr(pw_host_addr),
-        .host_din(pw_host_din),
-        .host_dout(pw_host_dout)
-    );
+    generate
+        if (HAS_INTERNAL_POLY) begin : gen_int_pw
+            poly_pointwise_top u_pw (
+                .clk(clk),
+                .rst_n(rst_n),
+                .start(pw_start),
+                .done(pw_done),
+                .host_sel(pw_host_sel),
+                .host_we(pw_host_we),
+                .host_addr(pw_host_addr),
+                .host_din(pw_host_din),
+                .host_dout(pw_host_dout)
+            );
+
+            assign ext_pw_start     = 1'b0;
+            assign ext_pw_host_sel  = 1'b0;
+            assign ext_pw_host_we   = 1'b0;
+            assign ext_pw_host_addr = 8'd0;
+            assign ext_pw_host_din  = 16'd0;
+        end else begin : gen_ext_pw
+            assign ext_pw_start     = pw_start;
+            assign ext_pw_host_sel  = pw_host_sel;
+            assign ext_pw_host_we   = pw_host_we;
+            assign ext_pw_host_addr = pw_host_addr;
+            assign ext_pw_host_din  = pw_host_din;
+
+            assign pw_done      = ext_pw_done;
+            assign pw_host_dout = ext_pw_host_dout;
+        end
+    endgenerate
 
     // =============================================================
     // 8) poly_add_sub_top (ADD mode)
@@ -635,18 +757,39 @@ module kpke_encrypt #(
                           (state == S_V_ADDMSG_LOAD_B_LOOP) ? msg_poly_load_din :
                           16'd0;
 
-    poly_add_sub_top u_add (
-        .clk(clk),
-        .rst_n(rst_n),
-        .start(add_start),
-        .is_sub(1'b0),
-        .done(add_done),
-        .host_sel(add_host_sel),
-        .host_we(add_host_we),
-        .host_addr(add_host_addr),
-        .host_din(add_host_din),
-        .host_dout(add_host_dout)
-    );
+    generate
+        if (HAS_INTERNAL_POLY) begin : gen_int_add
+            poly_add_sub_top u_add (
+                .clk(clk),
+                .rst_n(rst_n),
+                .start(add_start),
+                .is_sub(1'b0),
+                .done(add_done),
+                .host_sel(add_host_sel),
+                .host_we(add_host_we),
+                .host_addr(add_host_addr),
+                .host_din(add_host_din),
+                .host_dout(add_host_dout)
+            );
+
+            assign ext_add_start     = 1'b0;
+            assign ext_add_is_sub    = 1'b0;
+            assign ext_add_host_sel  = 1'b0;
+            assign ext_add_host_we   = 1'b0;
+            assign ext_add_host_addr = 8'd0;
+            assign ext_add_host_din  = 16'd0;
+        end else begin : gen_ext_add
+            assign ext_add_start     = add_start;
+            assign ext_add_is_sub    = 1'b0;
+            assign ext_add_host_sel  = add_host_sel;
+            assign ext_add_host_we   = add_host_we;
+            assign ext_add_host_addr = add_host_addr;
+            assign ext_add_host_din  = add_host_din;
+
+            assign add_done      = ext_add_done;
+            assign add_host_dout = ext_add_host_dout;
+        end
+    endgenerate
 
     // =============================================================
     // 9) poly_frommsg
@@ -683,19 +826,39 @@ module kpke_encrypt #(
     assign comp_coeff_a0 = comp_mode_v ? v_rd_a0 : u_rd_a0;
     assign comp_coeff_a1 = comp_mode_v ? v_rd_a1 : u_rd_a1;
 
-    poly_compress u_compress (
-        .clk(clk),
-        .rst_n(rst_n),
-        .start(comp_start),
-        .d_sel(comp_d_sel_reg),
-        .done(comp_done),
-        .coeff_addr(comp_coeff_addr),
-        .coeff_a0(comp_coeff_a0),
-        .coeff_a1(comp_coeff_a1),
-        .byte_we(comp_byte_we),
-        .byte_addr(comp_byte_addr),
-        .byte_dout(comp_byte_dout)
-    );
+    generate
+        if (HAS_INTERNAL_POLY) begin : gen_int_compress
+            poly_compress u_compress (
+                .clk(clk),
+                .rst_n(rst_n),
+                .start(comp_start),
+                .d_sel(comp_d_sel_reg),
+                .done(comp_done),
+                .coeff_addr(comp_coeff_addr),
+                .coeff_a0(comp_coeff_a0),
+                .coeff_a1(comp_coeff_a1),
+                .byte_we(comp_byte_we),
+                .byte_addr(comp_byte_addr),
+                .byte_dout(comp_byte_dout)
+            );
+
+            assign ext_comp_start    = 1'b0;
+            assign ext_comp_d_sel    = 2'b00;
+            assign ext_comp_coeff_a0 = 16'd0;
+            assign ext_comp_coeff_a1 = 16'd0;
+        end else begin : gen_ext_compress
+            assign ext_comp_start    = comp_start;
+            assign ext_comp_d_sel    = comp_d_sel_reg;
+            assign ext_comp_coeff_a0 = comp_coeff_a0;
+            assign ext_comp_coeff_a1 = comp_coeff_a1;
+
+            assign comp_done       = ext_comp_done;
+            assign comp_coeff_addr = ext_comp_coeff_addr;
+            assign comp_byte_we    = ext_comp_byte_we;
+            assign comp_byte_addr  = ext_comp_byte_addr;
+            assign comp_byte_dout  = ext_comp_byte_dout;
+        end
+    endgenerate
 
     assign ct_we   = ((state == S_COMP_U_WAIT) || (state == S_COMP_V_WAIT)) ? comp_byte_we : 1'b0;
     assign ct_addr = comp_base_offset + {2'b00, comp_byte_addr};

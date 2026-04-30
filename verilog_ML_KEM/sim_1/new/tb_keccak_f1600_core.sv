@@ -12,6 +12,16 @@ module tb_keccak_f1600_core();
     logic [1599:0]  state_out;
     logic           done;
 
+    // Step 3.K1: new ports. TB stays in legacy "load on start" mode
+    // (load_on_start=1) so state_in is loaded into A on the start pulse.
+    // The byte-XOR/init interface is unused in this TB and tied to 0.
+    logic           load_on_start;
+    logic           init_pulse;
+    logic           xor_we;
+    logic [7:0]     xor_byte_addr;
+    logic [7:0]     xor_byte_data;
+    logic [7:0]     byte_dout;
+
     // =========================================================
     // 2. DEVICE UNDER TEST (DUT)
     // =========================================================
@@ -19,7 +29,13 @@ module tb_keccak_f1600_core();
         .clk(clk),
         .rst_n(rst_n),
         .start(start),
+        .load_on_start(load_on_start),
         .state_in(state_in),
+        .init(init_pulse),
+        .xor_we(xor_we),
+        .xor_byte_addr(xor_byte_addr),
+        .xor_byte_data(xor_byte_data),
+        .byte_dout(byte_dout),
         .state_out(state_out),
         .done(done)
     );
@@ -145,6 +161,12 @@ module tb_keccak_f1600_core();
         rst_n = 0;
         start = 0;
         state_in = 0;
+        // Step 3.K1: legacy mode for direct state_in load on start
+        load_on_start = 1'b1;
+        init_pulse    = 1'b0;
+        xor_we        = 1'b0;
+        xor_byte_addr = 8'd0;
+        xor_byte_data = 8'd0;
 
         $display("=================================================");
         $display("   STARTING BATCH TEST: KECCAK-F[1600] CORE      ");
