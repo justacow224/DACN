@@ -465,6 +465,18 @@ module kpke_encrypt #(
     wire        k_dout_valid;
     reg         fsm_k_dout_ready;
     wire        parse_k_dout_ready;
+    // R-new-A Phase D1: lane squeeze for PRF (only used when HAS_INTERNAL_KECCAK=1).
+    // squeeze_lane_mode_reg is latched into the sponge on each init pulse:
+    //   - Before PRF init  (S_NOISE_INIT) → set to 1, sponge enters lane squeeze
+    //   - Before XOF init  (S_U_XOF_INIT) → set to 0, sponge enters byte squeeze
+    // For HAS_INTERNAL_KECCAK=0 (production via shared sponge in ml_kem_top),
+    // the external sponge stays byte mode; lane signals are tied off below and
+    // the FSM falls back to the byte path automatically because k_lane_dout_valid
+    // is 0.
+    reg         squeeze_lane_mode_reg;
+    wire [63:0] k_lane_dout;
+    wire        k_lane_dout_valid;
+    reg         k_lane_dout_ready;
 
     wire k_dout_ready = (state == S_U_PARSE_WAIT) ? parse_k_dout_ready : fsm_k_dout_ready;
 
@@ -477,7 +489,9 @@ module kpke_encrypt #(
                 .hash_type(hash_type),
                 .finalize(finalize_keccak),
                 .absorb_lane_mode(1'b0),
-                .squeeze_lane_mode(1'b0),
+                // R-new-A Phase D1: drive lane squeeze mode from FSM-controlled
+                // register so PRF gets 16-cycle squeeze and XOF stays on byte path.
+                .squeeze_lane_mode(squeeze_lane_mode_reg),
                 .din(k_din),
                 .din_valid(k_din_valid),
                 .din_ready(k_din_ready),
@@ -487,9 +501,9 @@ module kpke_encrypt #(
                 .dout(k_dout),
                 .dout_valid(k_dout_valid),
                 .dout_ready(k_dout_ready),
-                .lane_dout(),
-                .lane_dout_valid(),
-                .lane_dout_ready(1'b0)
+                .lane_dout(k_lane_dout),
+                .lane_dout_valid(k_lane_dout_valid),
+                .lane_dout_ready(k_lane_dout_ready)
             );
 
             assign ext_k_init       = 1'b0;
@@ -508,6 +522,12 @@ module kpke_encrypt #(
             assign k_dout           = ext_k_dout;
             assign k_dout_valid     = ext_k_dout_valid;
             assign ext_k_dout_ready = k_dout_ready;
+            // R-new-A Phase D1: external (shared-sponge) path not lane-aware
+            // yet (Phase D2 will extend ml_kem_top mux). Tie off lane squeeze
+            // signals so the FSM lane-path is dead in this mode and S_PRF_WAIT
+            // falls back to the byte-path automatically.
+            assign k_lane_dout       = 64'd0;
+            assign k_lane_dout_valid = 1'b0;
         end
     endgenerate
 
@@ -524,11 +544,20 @@ module kpke_encrypt #(
     wire [15:0] cbd_ram_a1_din;
 
     // Canonical Xilinx single-port BRAM: dedicated write-only always block
-    // with no reset. Triggered when PRF_WAIT has accumulated 8 bytes into
-    // prf_shift and is ready to commit a 64-bit word into prf_buf.
-    wire        prf_buf_we_w    = (state == S_PRF_WAIT) && k_dout_valid && fsm_k_dout_ready && (prf_byte_idx == 3'd7);
+    // with no reset. Two trigger paths:
+    //   - Byte path (legacy / external): PRF_WAIT accumulated 8 bytes into
+    //     prf_shift; commit a 64-bit word at prf_byte_idx == 7.
+    //   - R-new-A Phase D1 lane path (HAS_INTERNAL_KECCAK=1): PRF_WAIT receives
+    //     one full 64-bit lane per cycle from k_lane_dout; commit immediately.
+    // Mutually exclusive at runtime — sponge asserts either dout_valid (byte)
+    // or lane_dout_valid (lane), never both per init session.
+    wire        prf_advance_byte = (state == S_PRF_WAIT) && k_dout_valid && fsm_k_dout_ready;
+    wire        prf_advance_lane = (state == S_PRF_WAIT) && k_lane_dout_valid && k_lane_dout_ready;
+    wire        prf_buf_we_w    = prf_advance_lane ||
+                                  (prf_advance_byte && (prf_byte_idx == 3'd7));
     wire [3:0]  prf_buf_waddr_w = prf_word_idx;
-    wire [63:0] prf_buf_wdata_w = {k_dout, prf_shift[63:8]};
+    wire [63:0] prf_buf_wdata_w = prf_advance_lane ? k_lane_dout
+                                                   : {k_dout, prf_shift[63:8]};
 
     always @(posedge clk) begin
         if (prf_buf_we_w) begin
@@ -1153,14 +1182,17 @@ module kpke_encrypt #(
             ct_rd_pending    <= 1'b0;
             ct_rd_pending_d1 <= 1'b0;
 
-            init_keccak      <= 1'b0;
-            hash_type        <= 2'b00;
-            finalize_keccak  <= 1'b0;
-            k_din            <= 8'd0;
-            k_din_valid      <= 1'b0;
-            fsm_k_dout_ready <= 1'b0;
-            cbd_start        <= 1'b0;
-            parse_start      <= 1'b0;
+            init_keccak           <= 1'b0;
+            hash_type             <= 2'b00;
+            finalize_keccak       <= 1'b0;
+            k_din                 <= 8'd0;
+            k_din_valid           <= 1'b0;
+            fsm_k_dout_ready      <= 1'b0;
+            // R-new-A Phase D1
+            squeeze_lane_mode_reg <= 1'b0;
+            k_lane_dout_ready     <= 1'b0;
+            cbd_start             <= 1'b0;
+            parse_start           <= 1'b0;
 
             decode_idx       <= 2'd0;
             noise_stage      <= 2'd0;
@@ -1286,12 +1318,13 @@ module kpke_encrypt #(
                     end else if ((noise_stage == 2'd2) && (noise_idx == 2'd1)) begin
                         state <= S_FROMMSG_START;
                     end else begin
-                        init_keccak <= 1'b1;
-                        hash_type   <= 2'b01; // SHAKE256
-                        var_k       <= 12'd0;
-                        k_din       <= r_buf[5'd0];
-                        k_din_valid <= 1'b1;
-                        state       <= S_PRF_ABSORB;
+                        init_keccak           <= 1'b1;
+                        hash_type             <= 2'b01; // SHAKE256
+                        squeeze_lane_mode_reg <= 1'b1;  // R-new-A Phase D1: lane squeeze for PRF
+                        var_k                 <= 12'd0;
+                        k_din                 <= r_buf[5'd0];
+                        k_din_valid           <= 1'b1;
+                        state                 <= S_PRF_ABSORB;
                     end
                 end
 
@@ -1314,19 +1347,34 @@ module kpke_encrypt #(
                 end
 
                 S_PRF_FINAL: begin
-                    finalize_keccak <= 1'b1;
-                    fsm_k_dout_ready <= 1'b1;
-                    prf_word_idx    <= 4'd0;
-                    prf_byte_idx    <= 3'd0;
-                    prf_shift       <= 64'd0;
-                    state           <= S_PRF_WAIT;
+                    finalize_keccak   <= 1'b1;
+                    fsm_k_dout_ready  <= 1'b1;        // legacy byte path ready
+                    k_lane_dout_ready <= 1'b1;        // R-new-A Phase D1 lane path ready
+                    prf_word_idx      <= 4'd0;
+                    prf_byte_idx      <= 3'd0;
+                    prf_shift         <= 64'd0;
+                    state             <= S_PRF_WAIT;
                 end
 
                 S_PRF_WAIT: begin
                     // prf_buf write moved to dedicated always block below
                     // (canonical Xilinx single-port BRAM, no async reset).
-                    // FSM here only updates indices/shift register/state.
-                    if (k_dout_valid && fsm_k_dout_ready) begin
+                    // FSM here only updates indices/state.
+                    //
+                    // R-new-A Phase D1: dual-path. squeeze_lane_mode_reg
+                    // (latched into the sponge at S_NOISE_INIT) determines
+                    // which path fires. In lane mode, prf_advance_lane
+                    // pulses once per cycle for 16 cycles. In byte mode
+                    // (HAS_INTERNAL_KECCAK=0 or future fallback), the byte
+                    // shift-register accumulator path fires every 8 cycles.
+                    if (prf_advance_lane) begin
+                        if (prf_word_idx == 4'd15) begin
+                            k_lane_dout_ready <= 1'b0;
+                            state <= S_CBD_START;
+                        end else begin
+                            prf_word_idx <= prf_word_idx + 4'd1;
+                        end
+                    end else if (prf_advance_byte) begin
                         prf_shift <= {k_dout, prf_shift[63:8]};
                         if (prf_byte_idx == 3'd7) begin
                             prf_byte_idx <= 3'd0;
@@ -1422,12 +1470,13 @@ module kpke_encrypt #(
                 end
 
                 S_U_XOF_INIT: begin
-                    init_keccak <= 1'b1;
-                    hash_type   <= 2'b00; // SHAKE128
-                    var_k       <= 12'd0;
-                    k_din       <= rho_reg[5'd0];
-                    k_din_valid <= 1'b1;
-                    state       <= S_U_XOF_ABSORB;
+                    init_keccak           <= 1'b1;
+                    hash_type             <= 2'b00; // SHAKE128
+                    squeeze_lane_mode_reg <= 1'b0;  // R-new-A Phase D1: byte squeeze for parse
+                    var_k                 <= 12'd0;
+                    k_din                 <= rho_reg[5'd0];
+                    k_din_valid           <= 1'b1;
+                    state                 <= S_U_XOF_ABSORB;
                 end
 
                 S_U_XOF_ABSORB: begin
