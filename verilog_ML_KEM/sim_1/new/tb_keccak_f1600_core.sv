@@ -12,15 +12,22 @@ module tb_keccak_f1600_core();
     logic [1599:0]  state_out;
     logic           done;
 
-    // Step 3.K1: new ports. TB stays in legacy "load on start" mode
-    // (load_on_start=1) so state_in is loaded into A on the start pulse.
-    // The byte-XOR/init interface is unused in this TB and tied to 0.
+    // Step 3.K1: byte-level absorb/squeeze ports (legacy "load on start"
+    // mode = 1 in the original 5 testcases; switched off and driven by the
+    // R-new-A Phase A lane-absorb testcase below).
     logic           load_on_start;
     logic           init_pulse;
     logic           xor_we;
     logic [7:0]     xor_byte_addr;
     logic [7:0]     xor_byte_data;
     logic [7:0]     byte_dout;
+
+    // R-new-A Phase A: lane-wide absorb/squeeze ports. Driven by the new
+    // lane-mode testcase at the end of this TB.
+    logic           xor_lane_we;
+    logic [4:0]     xor_lane_addr;
+    logic [63:0]    xor_lane_data;
+    logic [63:0]    lane_dout;
 
     // =========================================================
     // 2. DEVICE UNDER TEST (DUT)
@@ -36,6 +43,10 @@ module tb_keccak_f1600_core();
         .xor_byte_addr(xor_byte_addr),
         .xor_byte_data(xor_byte_data),
         .byte_dout(byte_dout),
+        .xor_lane_we(xor_lane_we),
+        .xor_lane_addr(xor_lane_addr),
+        .xor_lane_data(xor_lane_data),
+        .lane_dout(lane_dout),
         .state_out(state_out),
         .done(done)
     );
@@ -167,6 +178,10 @@ module tb_keccak_f1600_core();
         xor_we        = 1'b0;
         xor_byte_addr = 8'd0;
         xor_byte_data = 8'd0;
+        // R-new-A Phase A: lane interface idle for the first 5 testcases.
+        xor_lane_we   = 1'b0;
+        xor_lane_addr = 5'd0;
+        xor_lane_data = 64'd0;
 
         $display("=================================================");
         $display("   STARTING BATCH TEST: KECCAK-F[1600] CORE      ");
@@ -219,7 +234,84 @@ module tb_keccak_f1600_core();
         $display("=================================================");
         $display("   ALL 5 TESTCASES PASSED FLAWLESSLY! CONGRATS!  ");
         $display("=================================================");
-        
+
+        // =========================================================
+        // 6. R-new-A PHASE A: LANE-INTERFACE TEST
+        //    Build state via lane absorb (init + 25 lane XORs into a
+        //    cleared A), permute with load_on_start=0, then verify both
+        //    state_out AND lane_dout (combinational lane read) match the
+        //    same golden permutation as the byte/state_in path.
+        // =========================================================
+        $display("-------------------------------------------------");
+        $display(">> R-new-A PHASE A: LANE-MODE TESTCASE");
+
+        // Generate fresh random input lanes
+        for (i = 0; i < 25; i = i + 1) begin
+            random_word = {$urandom, $urandom};
+            state_in[i*64 +: 64] = random_word;   // also kept for reference
+            tb_state[i] = random_word;
+        end
+        calculate_keccak_golden();
+
+        // Switch to sponge-mode (no state_in load on start)
+        @(negedge clk);
+        load_on_start = 1'b0;
+
+        // 1-cycle init pulse to clear A
+        init_pulse = 1'b1;
+        @(negedge clk);
+        init_pulse = 1'b0;
+
+        // 25 cycles of lane absorb XOR — XOR each lane of state_in into
+        // A[i] which is currently 0, so A[i] becomes state_in[i].
+        for (i = 0; i < 25; i = i + 1) begin
+            xor_lane_we   = 1'b1;
+            xor_lane_addr = i[4:0];
+            xor_lane_data = state_in[i*64 +: 64];
+            @(negedge clk);
+        end
+        xor_lane_we   = 1'b0;
+        xor_lane_addr = 5'd0;
+        xor_lane_data = 64'd0;
+
+        // Kick off permutation in sponge mode (A retains absorb-XORed contents)
+        start = 1;
+        @(negedge clk);
+        start = 0;
+
+        wait(done);
+        @(negedge clk);
+
+        $display("   [PERFORMANCE] Lane-mode permutation took %0d cycles.", cycle_count);
+
+        // Verify state_out matches golden (full state)
+        if (state_out !== golden_out) begin
+            $display(">> [FAILED] Lane-absorb path produced wrong state_out.");
+            for (i = 0; i < 25; i = i + 1) begin
+                if (state_out[i*64 +: 64] !== golden_out[i*64 +: 64]) begin
+                    $display("   [DEBUG] Word %0d - Expected: %16h, Got: %16h",
+                             i, golden_out[i*64 +: 64], state_out[i*64 +: 64]);
+                end
+            end
+            $finish;
+        end
+
+        // Verify lane_dout combinationally returns the correct lane for each addr
+        for (i = 0; i < 25; i = i + 1) begin
+            xor_lane_addr = i[4:0];
+            #1;     // settle combinational
+            if (lane_dout !== golden_out[i*64 +: 64]) begin
+                $display(">> [FAILED] lane_dout mismatch at lane %0d. Expected: %16h, Got: %16h",
+                         i, golden_out[i*64 +: 64], lane_dout);
+                $finish;
+            end
+        end
+
+        $display(">> [SUCCESS] R-new-A Phase A LANE-MODE TESTCASE PASSED 100%%!");
+        $display("=================================================");
+        $display("   ALL TESTS PASSED: Phase A lane interface OK   ");
+        $display("=================================================");
+
         #50;
         $finish;
     end

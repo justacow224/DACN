@@ -59,6 +59,13 @@ module keccak_sponge_top (
         .xor_byte_addr(core_xor_byte_addr),
         .xor_byte_data(core_xor_byte_data),
         .byte_dout(core_byte_dout),
+        // R-new-A Phase A: lane interface present on core but unused in this
+        // legacy byte-mode sponge. Future lane-mode sponge replaces this
+        // instantiation. Tying we=0 leaves the lane absorb path inactive.
+        .xor_lane_we(1'b0),
+        .xor_lane_addr(5'd0),
+        .xor_lane_data(64'd0),
+        .lane_dout(),
         .state_out(),                          // unused — sponge accesses bytes only
         .done(core_done)
     );

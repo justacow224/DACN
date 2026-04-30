@@ -19,6 +19,17 @@ module keccak_f1600_core (
     input  wire [7:0]       xor_byte_addr,    // 0..199 byte address (lane=addr[7:3], byte_in_lane=addr[2:0])
     input  wire [7:0]       xor_byte_data,
     output wire [7:0]       byte_dout,        // combinational byte read of A at xor_byte_addr
+    // R-new-A Phase A: lane-wide (64-bit / 1-lane-per-cycle) absorb/squeeze
+    // interface, parallel to the byte interface above. Eliminates the
+    // 1-cycle-per-byte streaming bottleneck (~9k bytes/Encaps → ~1.16k
+    // lanes/Encaps). Used by future lane-aware sponge state; current sponge
+    // ties these to 0 for byte-mode backward compatibility. Both interfaces
+    // share the same A[0:24] storage so semantic XOR results are identical
+    // when driven equivalently.
+    input  wire             xor_lane_we,      // 1 = XOR xor_lane_data into A[xor_lane_addr]
+    input  wire [4:0]       xor_lane_addr,    // 0..24 lane index
+    input  wire [63:0]      xor_lane_data,
+    output wire [63:0]      lane_dout,        // combinational lane read of A at xor_lane_addr
     // Step 3.K0: state_out is now a combinational view of A (no register).
     // After the final round, A holds the post-permutation state and stays
     // stable while FSM is back in IDLE — sponge's 1-cycle-after-done capture
@@ -168,6 +179,12 @@ module keccak_f1600_core (
                         // byte position in lane = [2:0]).
                         A[xor_byte_addr[7:3]][xor_byte_addr[2:0]*8 +: 8] <=
                             A[xor_byte_addr[7:3]][xor_byte_addr[2:0]*8 +: 8] ^ xor_byte_data;
+                    end else if (xor_lane_we) begin
+                        // R-new-A Phase A: lane-wide absorb XOR. XORs the full
+                        // 64-bit lane in one cycle. Mutually exclusive with
+                        // xor_we from caller side — the else-if cascade only
+                        // makes byte XOR take precedence if both somehow assert.
+                        A[xor_lane_addr] <= A[xor_lane_addr] ^ xor_lane_data;
                     end
                 end
 
@@ -203,5 +220,10 @@ module keccak_f1600_core (
     // Step 3.K1: combinational byte read for sponge squeeze path.
     // byte_dout = A[xor_byte_addr/8][xor_byte_addr%8 * 8 +: 8]
     assign byte_dout = A[xor_byte_addr[7:3]][xor_byte_addr[2:0]*8 +: 8];
+
+    // R-new-A Phase A: combinational lane read for lane-wide squeeze path.
+    // lane_dout = A[xor_lane_addr]. Future lane-aware sponge will use this
+    // to read 8 bytes per cycle instead of 1.
+    assign lane_dout = A[xor_lane_addr];
 
 endmodule
