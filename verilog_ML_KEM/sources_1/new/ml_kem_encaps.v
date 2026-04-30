@@ -260,7 +260,13 @@ module ml_kem_encaps #(
                 .ext_k_din_ready(enc_k_din_ready),
                 .ext_k_dout(enc_k_dout),
                 .ext_k_dout_valid(enc_k_dout_valid),
-                .ext_k_dout_ready(enc_k_dout_ready)
+                .ext_k_dout_ready(enc_k_dout_ready),
+                // R-new-A Phase D2: lane PRF wired only in production (ml_kem_top).
+                // ml_kem_encaps standalone TB falls back to byte path via tie-off.
+                .ext_k_squeeze_lane_mode(),
+                .ext_k_lane_dout(64'd0),
+                .ext_k_lane_dout_valid(1'b0),
+                .ext_k_lane_dout_ready()
             );
 
             // No external encrypt port driven in this branch.

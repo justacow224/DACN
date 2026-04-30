@@ -316,6 +316,11 @@ module ml_kem_top #
     wire [7:0]  kpke_enc_k_dout;
     wire        kpke_enc_k_dout_valid;
     wire        kpke_enc_k_dout_ready;
+    // R-new-A Phase D2: lane squeeze fanin/fanout for shared kpke_encrypt
+    wire        kpke_enc_k_squeeze_lane_mode;
+    wire [63:0] kpke_enc_k_lane_dout;
+    wire        kpke_enc_k_lane_dout_valid;
+    wire        kpke_enc_k_lane_dout_ready;
 
     // Per-owner ext_enc_* signals out of u_encaps / u_decaps (driven only when
     // their HAS_INTERNAL_ENCRYPT == 0).
@@ -417,9 +422,17 @@ module ml_kem_top #
                                    (k_owner == OP_KEYGEN) ? kg_k_dout_ready :
                                    (k_owner == OP_ENCAPS) ? enc_k_dout_ready :
                                    (k_owner == OP_DECAPS) ? dec_k_dout_ready : 1'b0;
+    // R-new-A Phase D2: only kpke_encrypt drives lane squeeze (PRF SHAKE-256).
+    // keygen/encaps/decaps top-level FSMs use byte mode for their own G/H/J
+    // hashes — lane mode stays low for them. encrypt_owns_keccak already
+    // gates the kpke_encrypt-vs-others priority, so the lane mux mirrors it.
+    wire        top_k_squeeze_lane_mode = encrypt_owns_keccak ? kpke_enc_k_squeeze_lane_mode : 1'b0;
+    wire        top_k_lane_dout_ready   = encrypt_owns_keccak ? kpke_enc_k_lane_dout_ready   : 1'b0;
     wire        top_k_din_ready;
     wire [7:0]  top_k_dout;
     wire        top_k_dout_valid;
+    wire [63:0] top_k_lane_dout;
+    wire        top_k_lane_dout_valid;
 
     keccak_sponge_top u_keccak (
         .clk(clk),
@@ -427,9 +440,12 @@ module ml_kem_top #
         .init(top_k_init),
         .hash_type(top_k_hash_type),
         .finalize(top_k_finalize),
-        // R-new-A Phase B+C: byte mode (lane mode unused in current pipeline)
+        // R-new-A Phase B: byte absorb (lane absorb unused — most absorbs are
+        // byte-aligned but not multiple-of-8; PRF seed is 33 bytes for ex.).
         .absorb_lane_mode(1'b0),
-        .squeeze_lane_mode(1'b0),
+        // R-new-A Phase D2: lane squeeze enabled when kpke_encrypt requests it
+        // (PRF SHAKE-256). Latched in the sponge on each init.
+        .squeeze_lane_mode(top_k_squeeze_lane_mode),
         .din(top_k_din),
         .din_valid(top_k_din_valid),
         .din_ready(top_k_din_ready),
@@ -439,9 +455,9 @@ module ml_kem_top #
         .dout(top_k_dout),
         .dout_valid(top_k_dout_valid),
         .dout_ready(top_k_dout_ready),
-        .lane_dout(),
-        .lane_dout_valid(),
-        .lane_dout_ready(1'b0)
+        .lane_dout(top_k_lane_dout),
+        .lane_dout_valid(top_k_lane_dout_valid),
+        .lane_dout_ready(top_k_lane_dout_ready)
     );
 
     // Keccak fanout. encrypt_owns_keccak preempts: when the shared encrypt is
@@ -461,6 +477,9 @@ module ml_kem_top #
     assign kpke_enc_k_din_ready  = encrypt_owns_keccak ? top_k_din_ready  : 1'b0;
     assign kpke_enc_k_dout       = encrypt_owns_keccak ? top_k_dout       : 8'd0;
     assign kpke_enc_k_dout_valid = encrypt_owns_keccak ? top_k_dout_valid : 1'b0;
+    // R-new-A Phase D2: lane squeeze fanout — only valid while kpke_encrypt owns sponge
+    assign kpke_enc_k_lane_dout       = encrypt_owns_keccak ? top_k_lane_dout       : 64'd0;
+    assign kpke_enc_k_lane_dout_valid = encrypt_owns_keccak ? top_k_lane_dout_valid : 1'b0;
 
     // Shared kpke_encrypt I/O MUX: encaps owner during ENCAPS op, decaps owner
     // during DECAPS op. Mutually exclusive at op-level — no contention.
@@ -505,6 +524,11 @@ module ml_kem_top #
         .ext_k_dout(kpke_enc_k_dout),
         .ext_k_dout_valid(kpke_enc_k_dout_valid),
         .ext_k_dout_ready(kpke_enc_k_dout_ready),
+        // R-new-A Phase D2: lane squeeze for production PRF
+        .ext_k_squeeze_lane_mode(kpke_enc_k_squeeze_lane_mode),
+        .ext_k_lane_dout(kpke_enc_k_lane_dout),
+        .ext_k_lane_dout_valid(kpke_enc_k_lane_dout_valid),
+        .ext_k_lane_dout_ready(kpke_enc_k_lane_dout_ready),
         .ext_fromb_start(kpke_enc_fromb_start),
         .ext_fromb_done(kpke_enc_fromb_done),
         .ext_fromb_byte_addr(kpke_enc_fromb_byte_addr),

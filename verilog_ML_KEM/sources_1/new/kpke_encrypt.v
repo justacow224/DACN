@@ -40,6 +40,12 @@ module kpke_encrypt #(
     input  wire [7:0]   ext_k_dout,
     input  wire         ext_k_dout_valid,
     output wire         ext_k_dout_ready,
+    // R-new-A Phase D2: external lane squeeze interface, used only when
+    // HAS_INTERNAL_KECCAK == 0. Mirrors the lane signals on the shared sponge.
+    output wire         ext_k_squeeze_lane_mode,
+    input  wire [63:0]  ext_k_lane_dout,
+    input  wire         ext_k_lane_dout_valid,
+    output wire         ext_k_lane_dout_ready,
 
     // External shared poly-engine interface, used only when HAS_INTERNAL_POLY == 0.
     output wire         ext_fromb_start,
@@ -512,6 +518,10 @@ module kpke_encrypt #(
             assign ext_k_din        = 8'd0;
             assign ext_k_din_valid  = 1'b0;
             assign ext_k_dout_ready = 1'b0;
+            // R-new-A Phase D2: lane squeeze ports unused in internal-keccak
+            // mode (lane signals already wired directly to u_keccak above).
+            assign ext_k_squeeze_lane_mode = 1'b0;
+            assign ext_k_lane_dout_ready   = 1'b0;
         end else begin : gen_ext_keccak
             assign ext_k_init       = init_keccak;
             assign ext_k_hash_type  = hash_type;
@@ -522,12 +532,15 @@ module kpke_encrypt #(
             assign k_dout           = ext_k_dout;
             assign k_dout_valid     = ext_k_dout_valid;
             assign ext_k_dout_ready = k_dout_ready;
-            // R-new-A Phase D1: external (shared-sponge) path not lane-aware
-            // yet (Phase D2 will extend ml_kem_top mux). Tie off lane squeeze
-            // signals so the FSM lane-path is dead in this mode and S_PRF_WAIT
-            // falls back to the byte-path automatically.
-            assign k_lane_dout       = 64'd0;
-            assign k_lane_dout_valid = 1'b0;
+            // R-new-A Phase D2: lane squeeze flows out via ext_k_squeeze_lane_mode
+            // (set by squeeze_lane_mode_reg before each PRF init), and ext_k_lane_dout
+            // (driven by ml_kem_top owner mux from the shared sponge) feeds
+            // k_lane_dout/valid into the FSM. ext_k_lane_dout_ready returns the
+            // FSM's k_lane_dout_ready back to the mux.
+            assign ext_k_squeeze_lane_mode = squeeze_lane_mode_reg;
+            assign k_lane_dout             = ext_k_lane_dout;
+            assign k_lane_dout_valid       = ext_k_lane_dout_valid;
+            assign ext_k_lane_dout_ready   = k_lane_dout_ready;
         end
     endgenerate
 

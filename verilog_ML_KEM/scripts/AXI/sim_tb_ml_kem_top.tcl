@@ -38,6 +38,17 @@ set_property top tb_ml_kem_top $fs
 update_compile_order -fileset sim_1
 set_property xsim.simulate.runtime all $fs
 
+# Workaround for Windows env where `.` is not in PATH (NoDefaultCurrentDirectoryInExePath
+# in effect). Vivado launches `compile.bat` (no path prefix) from the xsim run dir;
+# CreateProcess can't resolve it without `.` in PATH. Prepend xsim run dir explicitly.
+set xsim_run_dir [file normalize [file join [get_property DIRECTORY [current_project]] "[get_property NAME [current_project]].sim" "sim_1" "behav" "xsim"]]
+if {[info exists ::env(PATH)]} {
+    set ::env(PATH) "$xsim_run_dir;$::env(PATH)"
+} else {
+    set ::env(PATH) $xsim_run_dir
+}
+puts "INFO: Prepended xsim run dir to PATH for compile.bat resolution: $xsim_run_dir"
+
 proc run_and_check {gate_name bypass_value run_dir must_have must_not_have} {
     set fs [get_filesets sim_1]
     puts "INFO: Running $gate_name (TB_BYPASS_CRYPTO=$bypass_value)"

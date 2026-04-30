@@ -245,7 +245,14 @@ module kpke_core #(
                 .ext_k_din_ready(k_din_ready),
                 .ext_k_dout(k_dout),
                 .ext_k_dout_valid(k_dout_valid),
-                .ext_k_dout_ready(k_dout_ready)
+                .ext_k_dout_ready(k_dout_ready),
+                // R-new-A Phase D2: lane PRF only wired in production (ml_kem_top).
+                // In kpke_core's standalone path, force byte mode by tying lane
+                // inputs to 0 — kpke_encrypt's FSM auto-falls back to prf_advance_byte.
+                .ext_k_squeeze_lane_mode(),
+                .ext_k_lane_dout(64'd0),
+                .ext_k_lane_dout_valid(1'b0),
+                .ext_k_lane_dout_ready()
             );
 
             assign ext_enc_start    = 1'b0;
