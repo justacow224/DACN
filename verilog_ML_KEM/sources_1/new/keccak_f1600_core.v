@@ -31,21 +31,27 @@ module keccak_f1600_core (
     localparam CALC = 1'b1;
 
     reg       fsm_state;
-    reg [4:0] round_idx; 
+    reg [4:0] round_idx;
 
-    wire [63:0] RC [0:23];
-    assign RC[0]  = 64'h0000000000000001; assign RC[1]  = 64'h0000000000008082;
-    assign RC[2]  = 64'h800000000000808A; assign RC[3]  = 64'h8000000080008000;
-    assign RC[4]  = 64'h000000000000808B; assign RC[5]  = 64'h0000000080000001;
-    assign RC[6]  = 64'h8000000080008081; assign RC[7]  = 64'h8000000000008009;
-    assign RC[8]  = 64'h000000000000008A; assign RC[9]  = 64'h0000000000000088;
-    assign RC[10] = 64'h0000000080008009; assign RC[11] = 64'h000000008000000A;
-    assign RC[12] = 64'h000000008000808B; assign RC[13] = 64'h800000000000008B;
-    assign RC[14] = 64'h8000000000008089; assign RC[15] = 64'h8000000000008003;
-    assign RC[16] = 64'h8000000000008002; assign RC[17] = 64'h8000000000000080;
-    assign RC[18] = 64'h000000000000800A; assign RC[19] = 64'h800000008000000A;
-    assign RC[20] = 64'h8000000080008081; assign RC[21] = 64'h8000000000008080;
-    assign RC[22] = 64'h0000000080000001; assign RC[23] = 64'h8000000080008008;
+    // Step R4: round-constant ROM. Hint Vivado to map RC[24][64] as a
+    // distributed-RAM ROM (RAM32M16-style) instead of synthesizing a
+    // combinational 24-to-1 64-bit MUX out of LUTs. Saves ~150-300 LUT
+    // depending on how aggressively the previous mux was packed.
+    (* rom_style = "distributed" *) reg [63:0] RC [0:23];
+    initial begin
+        RC[0]  = 64'h0000000000000001; RC[1]  = 64'h0000000000008082;
+        RC[2]  = 64'h800000000000808A; RC[3]  = 64'h8000000080008000;
+        RC[4]  = 64'h000000000000808B; RC[5]  = 64'h0000000080000001;
+        RC[6]  = 64'h8000000080008081; RC[7]  = 64'h8000000000008009;
+        RC[8]  = 64'h000000000000008A; RC[9]  = 64'h0000000000000088;
+        RC[10] = 64'h0000000080008009; RC[11] = 64'h000000008000000A;
+        RC[12] = 64'h000000008000808B; RC[13] = 64'h800000000000008B;
+        RC[14] = 64'h8000000000008089; RC[15] = 64'h8000000000008003;
+        RC[16] = 64'h8000000000008002; RC[17] = 64'h8000000000000080;
+        RC[18] = 64'h000000000000800A; RC[19] = 64'h800000008000000A;
+        RC[20] = 64'h8000000080008081; RC[21] = 64'h8000000000008080;
+        RC[22] = 64'h0000000080000001; RC[23] = 64'h8000000080008008;
+    end
 
     wire [63:0] current_RC = RC[round_idx];
 
@@ -106,13 +112,90 @@ module keccak_f1600_core (
                 wire [63:0] b_curr    = B_rho_pi[y*5 + x];
                 wire [63:0] b_plus_1  = B_rho_pi[y*5 + ((x+1)%5)];
                 wire [63:0] b_plus_2  = B_rho_pi[y*5 + ((x+2)%5)];
-                
+
                 wire [63:0] chi_res = b_curr ^ ((~b_plus_1) & b_plus_2);
-                
+
                 if (x == 0 && y == 0) begin
                     assign A_next[0] = chi_res ^ current_RC;
                 end else begin
                     assign A_next[y*5 + x] = chi_res;
+                end
+            end
+        end
+    endgenerate
+
+    // ============================================================
+    // Step R1: SECOND combinational round (unroll 2 rounds/cycle).
+    // Input is A_next (= round_idx round result); output is A_next2 (=
+    // round_idx+1 round result). Uses RC[round_idx+1] for the ι step.
+    // FSM writes A <= A_next2 every cycle, so the 24-round permutation
+    // completes in 12 cycles instead of 24 (-50% Keccak latency, biggest
+    // bottleneck after Steps 3.K0/K1).
+    // ============================================================
+
+    wire [63:0] current_RC2 = RC[round_idx + 5'd1];
+
+    wire [63:0] C2 [0:4];
+    wire [63:0] D2 [0:4];
+    wire [63:0] A_theta2 [0:24];
+    wire [63:0] A_next2  [0:24];
+
+    generate
+        for (x = 0; x < 5; x = x + 1) begin : gen_C2
+            assign C2[x] = A_next[x] ^ A_next[x+5] ^ A_next[x+10] ^ A_next[x+15] ^ A_next[x+20];
+        end
+        for (x = 0; x < 5; x = x + 1) begin : gen_D2
+            wire [63:0] c2_minus_1 = C2[(x+4)%5];
+            wire [63:0] c2_plus_1  = C2[(x+1)%5];
+            assign D2[x] = c2_minus_1 ^ {c2_plus_1[62:0], c2_plus_1[63:63]};
+        end
+        for (y = 0; y < 5; y = y + 1) begin : gen_theta2_y
+            for (x = 0; x < 5; x = x + 1) begin : gen_theta2_x
+                assign A_theta2[y*5 + x] = A_next[y*5 + x] ^ D2[x];
+            end
+        end
+    endgenerate
+
+    wire [63:0] B_rho_pi2 [0:24];
+    assign B_rho_pi2[0]  = A_theta2[0];
+    assign B_rho_pi2[10] = {A_theta2[1][62:0], A_theta2[1][63:63]};
+    assign B_rho_pi2[7]  = {A_theta2[10][60:0], A_theta2[10][63:61]};
+    assign B_rho_pi2[11] = {A_theta2[7][57:0], A_theta2[7][63:58]};
+    assign B_rho_pi2[17] = {A_theta2[11][53:0], A_theta2[11][63:54]};
+    assign B_rho_pi2[18] = {A_theta2[17][48:0], A_theta2[17][63:49]};
+    assign B_rho_pi2[3]  = {A_theta2[18][42:0], A_theta2[18][63:43]};
+    assign B_rho_pi2[5]  = {A_theta2[3][35:0], A_theta2[3][63:36]};
+    assign B_rho_pi2[16] = {A_theta2[5][27:0], A_theta2[5][63:28]};
+    assign B_rho_pi2[8]  = {A_theta2[16][18:0], A_theta2[16][63:19]};
+    assign B_rho_pi2[21] = {A_theta2[8][8:0], A_theta2[8][63:9]};
+    assign B_rho_pi2[24] = {A_theta2[21][61:0], A_theta2[21][63:62]};
+    assign B_rho_pi2[4]  = {A_theta2[24][49:0], A_theta2[24][63:50]};
+    assign B_rho_pi2[15] = {A_theta2[4][36:0], A_theta2[4][63:37]};
+    assign B_rho_pi2[23] = {A_theta2[15][22:0], A_theta2[15][63:23]};
+    assign B_rho_pi2[19] = {A_theta2[23][7:0], A_theta2[23][63:8]};
+    assign B_rho_pi2[13] = {A_theta2[19][55:0], A_theta2[19][63:56]};
+    assign B_rho_pi2[12] = {A_theta2[13][38:0], A_theta2[13][63:39]};
+    assign B_rho_pi2[2]  = {A_theta2[12][20:0], A_theta2[12][63:21]};
+    assign B_rho_pi2[20] = {A_theta2[2][1:0], A_theta2[2][63:2]};
+    assign B_rho_pi2[14] = {A_theta2[20][45:0], A_theta2[20][63:46]};
+    assign B_rho_pi2[22] = {A_theta2[14][24:0], A_theta2[14][63:25]};
+    assign B_rho_pi2[9]  = {A_theta2[22][2:0], A_theta2[22][63:3]};
+    assign B_rho_pi2[6]  = {A_theta2[9][43:0], A_theta2[9][63:44]};
+    assign B_rho_pi2[1]  = {A_theta2[6][19:0], A_theta2[6][63:20]};
+
+    generate
+        for (y = 0; y < 5; y = y + 1) begin : gen_chi2_y
+            for (x = 0; x < 5; x = x + 1) begin : gen_chi2_x
+                wire [63:0] b2_curr    = B_rho_pi2[y*5 + x];
+                wire [63:0] b2_plus_1  = B_rho_pi2[y*5 + ((x+1)%5)];
+                wire [63:0] b2_plus_2  = B_rho_pi2[y*5 + ((x+2)%5)];
+
+                wire [63:0] chi2_res = b2_curr ^ ((~b2_plus_1) & b2_plus_2);
+
+                if (x == 0 && y == 0) begin
+                    assign A_next2[0] = chi2_res ^ current_RC2;
+                end else begin
+                    assign A_next2[y*5 + x] = chi2_res;
                 end
             end
         end
@@ -157,18 +240,19 @@ module keccak_f1600_core (
                 end
 
                 CALC: begin
-                    // Always update A from A_next (including the final round).
-                    // Removes the 1,600-FF state_out copy that previously
-                    // duplicated A's contents at end-of-permutation.
+                    // Step R1: write A <= A_next2 (= 2 rounds advanced).
+                    // Loop runs round_idx = 0,2,4,...,22 → 12 iterations
+                    // for the full 24-round permutation.
                     for (i = 0; i < 25; i = i + 1) begin
-                        A[i] <= A_next[i];
+                        A[i] <= A_next2[i];
                     end
 
-                    if (round_idx == 23) begin
+                    if (round_idx == 5'd22) begin
+                        // Final pair (rounds 22+23) just written; finish.
                         fsm_state <= IDLE;
                         done      <= 1;
                     end else begin
-                        round_idx <= round_idx + 1;
+                        round_idx <= round_idx + 5'd2;
                     end
                 end
             endcase

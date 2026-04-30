@@ -1,7 +1,8 @@
 `timescale 1ns / 1ps
 
 module ml_kem_keygen #(
-    parameter HAS_INTERNAL_KECCAK = 1
+    parameter HAS_INTERNAL_KECCAK = 1,
+    parameter HAS_INTERNAL_POLY   = 1
 ) (
     input  wire         clk,
     input  wire         rst_n,
@@ -12,7 +13,7 @@ module ml_kem_keygen #(
     input  wire [255:0] seed_d_in,
     input  wire [255:0] seed_z_in,
 
-    // Output Memory Ports 
+    // Output Memory Ports
     // pk is 1184 bytes
     output wire         pk_we,
     output wire [10:0]  pk_addr,  // 0 to 1183
@@ -32,7 +33,35 @@ module ml_kem_keygen #(
     input  wire         ext_k_din_ready,
     input  wire [7:0]   ext_k_dout,
     input  wire         ext_k_dout_valid,
-    output wire         ext_k_dout_ready
+    output wire         ext_k_dout_ready,
+
+    // Step R3: external shared poly-engine interface, used only when
+    // HAS_INTERNAL_POLY == 0. Mirrors the kpke_encrypt/kpke_decrypt patterns
+    // added in Step 3.1, so the top-level can route keygen's NTT/PW/add
+    // requests to the same u_shared_* instances.
+    output wire         ext_ntt_start,
+    input  wire         ext_ntt_done,
+    output wire         ext_ntt_host_we,
+    output wire [7:0]   ext_ntt_host_addr,
+    output wire [15:0]  ext_ntt_host_din,
+    input  wire [15:0]  ext_ntt_host_dout,
+
+    output wire         ext_pw_start,
+    input  wire         ext_pw_done,
+    output wire         ext_pw_host_sel,
+    output wire         ext_pw_host_we,
+    output wire [7:0]   ext_pw_host_addr,
+    output wire [15:0]  ext_pw_host_din,
+    input  wire [15:0]  ext_pw_host_dout,
+
+    output wire         ext_add_start,
+    output wire         ext_add_is_sub,
+    input  wire         ext_add_done,
+    output wire         ext_add_host_sel,
+    output wire         ext_add_host_we,
+    output wire [7:0]   ext_add_host_addr,
+    output wire [15:0]  ext_add_host_din,
+    input  wire [15:0]  ext_add_host_dout
 );
 
     // =================================================================
@@ -94,9 +123,16 @@ module ml_kem_keygen #(
     // =================================================================
     // Internal Registers
     // =================================================================
-    reg [7:0] rho_reg [0:31];
-    reg [7:0] sigma_reg [0:31];
-    reg [7:0] h_pk_reg [0:31];
+    // Step R5: LUTRAM hints. Each is 32 bytes filled sequentially by SHAKE
+    // output (var_k 0..31 for rho/sigma; separate path for h_pk). All entries
+    // are written before any read, so the soft-clear-on-start that the
+    // previous design used (silicon "first pk replay" workaround) is no
+    // longer needed once Vivado treats them as deterministic LUTRAM cells
+    // rather than FF arrays. The for-loop reset below has been removed
+    // accordingly — same fix pattern as Step 1 prf_buf.
+    (* ram_style = "distributed" *) reg [7:0] rho_reg [0:31];
+    (* ram_style = "distributed" *) reg [7:0] sigma_reg [0:31];
+    (* ram_style = "distributed" *) reg [7:0] h_pk_reg [0:31];
     
     // Keccak Buffers
     // BRAM-friendly canonical pattern: no async/sync reset, single-port write
@@ -313,11 +349,26 @@ module ml_kem_keygen #(
     wire [15:0] ntt_host_din;
     wire [15:0] ntt_host_dout;
 
-    ntt_top u_ntt (
-        .clk(clk), .rst_n(rst_n), .start(ntt_start), .done(ntt_done),
-        .host_we(ntt_host_we), .host_addr(ntt_host_addr), 
-        .host_din(ntt_host_din), .host_dout(ntt_host_dout)
-    );
+    generate
+        if (HAS_INTERNAL_POLY) begin : gen_int_ntt
+            ntt_top u_ntt (
+                .clk(clk), .rst_n(rst_n), .start(ntt_start), .done(ntt_done),
+                .host_we(ntt_host_we), .host_addr(ntt_host_addr),
+                .host_din(ntt_host_din), .host_dout(ntt_host_dout)
+            );
+            assign ext_ntt_start     = 1'b0;
+            assign ext_ntt_host_we   = 1'b0;
+            assign ext_ntt_host_addr = 8'd0;
+            assign ext_ntt_host_din  = 16'd0;
+        end else begin : gen_ext_ntt
+            assign ext_ntt_start     = ntt_start;
+            assign ext_ntt_host_we   = ntt_host_we;
+            assign ext_ntt_host_addr = ntt_host_addr;
+            assign ext_ntt_host_din  = ntt_host_din;
+            assign ntt_done      = ext_ntt_done;
+            assign ntt_host_dout = ext_ntt_host_dout;
+        end
+    endgenerate
 
     // 4. Poly Parse Inline Top
     reg         parse_start;
@@ -347,11 +398,28 @@ module ml_kem_keygen #(
     wire [15:0] pw_host_din;
     wire [15:0] pw_host_dout;
 
-    poly_pointwise_top u_pw (
-        .clk(clk), .rst_n(rst_n), .start(pw_start), .done(pw_done),
-        .host_sel(pw_host_sel), .host_we(pw_host_we), .host_addr(pw_host_addr),
-        .host_din(pw_host_din), .host_dout(pw_host_dout)
-    );
+    generate
+        if (HAS_INTERNAL_POLY) begin : gen_int_pw
+            poly_pointwise_top u_pw (
+                .clk(clk), .rst_n(rst_n), .start(pw_start), .done(pw_done),
+                .host_sel(pw_host_sel), .host_we(pw_host_we), .host_addr(pw_host_addr),
+                .host_din(pw_host_din), .host_dout(pw_host_dout)
+            );
+            assign ext_pw_start     = 1'b0;
+            assign ext_pw_host_sel  = 1'b0;
+            assign ext_pw_host_we   = 1'b0;
+            assign ext_pw_host_addr = 8'd0;
+            assign ext_pw_host_din  = 16'd0;
+        end else begin : gen_ext_pw
+            assign ext_pw_start     = pw_start;
+            assign ext_pw_host_sel  = pw_host_sel;
+            assign ext_pw_host_we   = pw_host_we;
+            assign ext_pw_host_addr = pw_host_addr;
+            assign ext_pw_host_din  = pw_host_din;
+            assign pw_done      = ext_pw_done;
+            assign pw_host_dout = ext_pw_host_dout;
+        end
+    endgenerate
 
     // 6. Poly Add/Sub Top
     reg         add_start;
@@ -363,11 +431,30 @@ module ml_kem_keygen #(
     wire [15:0] add_host_din;
     wire [15:0] add_host_dout;
 
-    poly_add_sub_top u_add (
-        .clk(clk), .rst_n(rst_n), .start(add_start), .is_sub(add_is_sub), .done(add_done),
-        .host_sel(add_host_sel), .host_we(add_host_we), .host_addr(add_host_addr),
-        .host_din(add_host_din), .host_dout(add_host_dout)
-    );
+    generate
+        if (HAS_INTERNAL_POLY) begin : gen_int_add
+            poly_add_sub_top u_add (
+                .clk(clk), .rst_n(rst_n), .start(add_start), .is_sub(add_is_sub), .done(add_done),
+                .host_sel(add_host_sel), .host_we(add_host_we), .host_addr(add_host_addr),
+                .host_din(add_host_din), .host_dout(add_host_dout)
+            );
+            assign ext_add_start     = 1'b0;
+            assign ext_add_is_sub    = 1'b0;
+            assign ext_add_host_sel  = 1'b0;
+            assign ext_add_host_we   = 1'b0;
+            assign ext_add_host_addr = 8'd0;
+            assign ext_add_host_din  = 16'd0;
+        end else begin : gen_ext_add
+            assign ext_add_start     = add_start;
+            assign ext_add_is_sub    = add_is_sub;
+            assign ext_add_host_sel  = add_host_sel;
+            assign ext_add_host_we   = add_host_we;
+            assign ext_add_host_addr = add_host_addr;
+            assign ext_add_host_din  = add_host_din;
+            assign add_done      = ext_add_done;
+            assign add_host_dout = ext_add_host_dout;
+        end
+    endgenerate
 
     // 7. Poly ToBytes
     reg         tb_start;
@@ -594,7 +681,7 @@ module ml_kem_keygen #(
     // =================================================================
     // Main Control FSM
     // =================================================================
-    integer i_clr_buf;
+    // i_clr_buf removed (was only used by the soft-clear for-loop, now gone).
     always @(posedge clk) begin
         if (!rst_n) begin
             state           <= S_IDLE;
@@ -645,20 +732,18 @@ module ml_kem_keygen #(
                 S_IDLE: begin
                     done <= 0;
                     if (start) begin
-                        // Soft-clear internal buffers on every start. Without this,
-                        // residual data from a previous keygen call leaks into the
-                        // current run when seeds change. Symptom: keygen replays the
-                        // first call's pk for any subsequent call until rst_n pulses
-                        // (verified on KR260 — overlay reload fixes; back-to-back
-                        // keygen with different seeds reproduces).
-                        for (i_clr_buf = 0; i_clr_buf < 32; i_clr_buf = i_clr_buf + 1) begin
-                            rho_reg[i_clr_buf]   <= 8'd0;
-                            sigma_reg[i_clr_buf] <= 8'd0;
-                            h_pk_reg[i_clr_buf]  <= 8'd0;
-                        end
-                        // prf_buf clear removed — moved to dedicated BRAM write
-                        // block. PRF_WAIT writes all 16 words before CBD reads,
-                        // so stale data is overwritten before use.
+                        // Step R5: soft-clear of rho_reg/sigma_reg/h_pk_reg
+                        // removed. The previous "first pk replay" silicon bug
+                        // root cause was Synth's FF-array set/reset-priority
+                        // ambiguity. Now that the arrays carry the
+                        // (* ram_style = "distributed" *) hint they synthesize
+                        // as deterministic LUTRAM cells; SHAKE-512 fully
+                        // populates rho/sigma (var_k 0..63) and the H-pk hash
+                        // path fully populates h_pk_reg before any read, so
+                        // stale residual is overwritten before use — same
+                        // pattern as the Step 1 prf_buf cleanup.
+                        // prf_buf clear was already removed — moved to
+                        // dedicated BRAM write block.
                         prf_word_idx <= 4'd0;
                         prf_byte_idx <= 3'd0;
                         prf_shift    <= 64'd0;

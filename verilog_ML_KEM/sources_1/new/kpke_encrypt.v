@@ -217,8 +217,12 @@ module kpke_encrypt #(
     // Input/output byte buffers
     // =============================================================
     (* ram_style = "block" *) reg [7:0] ek_buf [0:1183];
-    reg [7:0] m_buf [0:31];
-    reg [7:0] r_buf [0:31];
+    // Step R5: explicit distributed-RAM hints. m_buf was already LUTRAM-inferred
+    // automatically (Synth 8-6904), but r_buf was not — Vivado kept it as 256
+    // FF. Both have a single-write-port pattern with mutually-exclusive read
+    // accesses, so they fit a single LUTRAM SDP cell.
+    (* ram_style = "distributed" *) reg [7:0] m_buf [0:31];
+    (* ram_style = "distributed" *) reg [7:0] r_buf [0:31];
     reg         ct_rd_en;
     reg [10:0]  ct_rd_addr;
     wire [7:0]  ct_rd_data;
@@ -259,7 +263,10 @@ module kpke_encrypt #(
     // =============================================================
     // Internal registers
     // =============================================================
-    reg [7:0] rho_reg [0:31];
+    // Step R5: distributed-RAM hint (was 256 FF dissolved). Single write port
+    // (in_we during ek-preload), reads happen one byte at a time during PRF
+    // absorb — natural fit for LUTRAM.
+    (* ram_style = "distributed" *) reg [7:0] rho_reg [0:31];
     // BRAM-friendly canonical pattern: no async reset, single-port write,
     // explicit ram_style attr. PRF_WAIT fully fills prf_buf (16 words) before
     // CBD reads via cbd_buf_dout, so stale-on-reset is harmless.

@@ -542,8 +542,25 @@ module ml_kem_top #
         .ext_comp_byte_dout(kpke_enc_comp_byte_dout)
     );
 
+    // Step R3: 3-way owner MUX. Encrypt has highest priority (re-encryption
+    // check during DECAPS), then decrypt, then keygen. Keygen is mutually
+    // exclusive with encrypt/decrypt at the op level, so poly_owner_kg
+    // simplifies to (k_owner == OP_KEYGEN) in practice.
     wire poly_owner_enc = kpke_enc_busy || kpke_enc_start;
     wire poly_owner_dec = !poly_owner_enc && (k_owner == OP_DECAPS) && dec_busy;
+    wire poly_owner_kg  = !poly_owner_enc && !poly_owner_dec && (k_owner == OP_KEYGEN);
+
+    // Keygen-side ext poly engine wires (Step R3). Drive shared NTT/PW/add.
+    wire        kg_poly_ntt_start, kg_poly_ntt_done, kg_poly_ntt_host_we;
+    wire [7:0]  kg_poly_ntt_host_addr;
+    wire [15:0] kg_poly_ntt_host_din, kg_poly_ntt_host_dout;
+    wire        kg_poly_pw_start, kg_poly_pw_done, kg_poly_pw_host_sel, kg_poly_pw_host_we;
+    wire [7:0]  kg_poly_pw_host_addr;
+    wire [15:0] kg_poly_pw_host_din, kg_poly_pw_host_dout;
+    wire        kg_poly_add_start, kg_poly_add_is_sub, kg_poly_add_done;
+    wire        kg_poly_add_host_sel, kg_poly_add_host_we;
+    wire [7:0]  kg_poly_add_host_addr;
+    wire [15:0] kg_poly_add_host_din, kg_poly_add_host_dout;
 
     wire        shared_fromb_done, shared_fromb_coeff_we;
     wire [8:0]  shared_fromb_byte_addr;
@@ -586,14 +603,18 @@ module ml_kem_top #
         .clk(clk),
         .rst_n(rst_n),
         .start(poly_owner_enc ? kpke_enc_ntt_start :
-               poly_owner_dec ? dec_poly_ntt_start : 1'b0),
+               poly_owner_dec ? dec_poly_ntt_start :
+               poly_owner_kg  ? kg_poly_ntt_start  : 1'b0),
         .done(shared_ntt_done),
         .host_we(poly_owner_enc ? kpke_enc_ntt_host_we :
-                 poly_owner_dec ? dec_poly_ntt_host_we : 1'b0),
+                 poly_owner_dec ? dec_poly_ntt_host_we :
+                 poly_owner_kg  ? kg_poly_ntt_host_we  : 1'b0),
         .host_addr(poly_owner_enc ? kpke_enc_ntt_host_addr :
-                   poly_owner_dec ? dec_poly_ntt_host_addr : 8'd0),
+                   poly_owner_dec ? dec_poly_ntt_host_addr :
+                   poly_owner_kg  ? kg_poly_ntt_host_addr  : 8'd0),
         .host_din(poly_owner_enc ? kpke_enc_ntt_host_din :
-                  poly_owner_dec ? dec_poly_ntt_host_din : 16'd0),
+                  poly_owner_dec ? dec_poly_ntt_host_din :
+                  poly_owner_kg  ? kg_poly_ntt_host_din  : 16'd0),
         .host_dout(shared_ntt_host_dout)
     );
 
@@ -601,6 +622,8 @@ module ml_kem_top #
     assign kpke_enc_ntt_host_dout = poly_owner_enc ? shared_ntt_host_dout : 16'd0;
     assign dec_poly_ntt_done      = poly_owner_dec ? shared_ntt_done      : 1'b0;
     assign dec_poly_ntt_host_dout = poly_owner_dec ? shared_ntt_host_dout : 16'd0;
+    assign kg_poly_ntt_done       = poly_owner_kg  ? shared_ntt_done      : 1'b0;
+    assign kg_poly_ntt_host_dout  = poly_owner_kg  ? shared_ntt_host_dout : 16'd0;
 
     wire        shared_intt_done;
     wire [15:0] shared_intt_host_dout;
@@ -632,16 +655,21 @@ module ml_kem_top #
         .clk(clk),
         .rst_n(rst_n),
         .start(poly_owner_enc ? kpke_enc_pw_start :
-               poly_owner_dec ? dec_poly_pw_start : 1'b0),
+               poly_owner_dec ? dec_poly_pw_start :
+               poly_owner_kg  ? kg_poly_pw_start  : 1'b0),
         .done(shared_pw_done),
         .host_sel(poly_owner_enc ? kpke_enc_pw_host_sel :
-                  poly_owner_dec ? dec_poly_pw_host_sel : 1'b0),
+                  poly_owner_dec ? dec_poly_pw_host_sel :
+                  poly_owner_kg  ? kg_poly_pw_host_sel  : 1'b0),
         .host_we(poly_owner_enc ? kpke_enc_pw_host_we :
-                 poly_owner_dec ? dec_poly_pw_host_we : 1'b0),
+                 poly_owner_dec ? dec_poly_pw_host_we :
+                 poly_owner_kg  ? kg_poly_pw_host_we  : 1'b0),
         .host_addr(poly_owner_enc ? kpke_enc_pw_host_addr :
-                   poly_owner_dec ? dec_poly_pw_host_addr : 8'd0),
+                   poly_owner_dec ? dec_poly_pw_host_addr :
+                   poly_owner_kg  ? kg_poly_pw_host_addr  : 8'd0),
         .host_din(poly_owner_enc ? kpke_enc_pw_host_din :
-                  poly_owner_dec ? dec_poly_pw_host_din : 16'd0),
+                  poly_owner_dec ? dec_poly_pw_host_din :
+                  poly_owner_kg  ? kg_poly_pw_host_din  : 16'd0),
         .host_dout(shared_pw_host_dout)
     );
 
@@ -649,6 +677,8 @@ module ml_kem_top #
     assign kpke_enc_pw_host_dout = poly_owner_enc ? shared_pw_host_dout : 16'd0;
     assign dec_poly_pw_done      = poly_owner_dec ? shared_pw_done      : 1'b0;
     assign dec_poly_pw_host_dout = poly_owner_dec ? shared_pw_host_dout : 16'd0;
+    assign kg_poly_pw_done       = poly_owner_kg  ? shared_pw_done      : 1'b0;
+    assign kg_poly_pw_host_dout  = poly_owner_kg  ? shared_pw_host_dout : 16'd0;
 
     wire        shared_add_done;
     wire [15:0] shared_add_host_dout;
@@ -657,18 +687,24 @@ module ml_kem_top #
         .clk(clk),
         .rst_n(rst_n),
         .start(poly_owner_enc ? kpke_enc_add_start :
-               poly_owner_dec ? dec_poly_add_start : 1'b0),
+               poly_owner_dec ? dec_poly_add_start :
+               poly_owner_kg  ? kg_poly_add_start  : 1'b0),
         .is_sub(poly_owner_enc ? kpke_enc_add_is_sub :
-                poly_owner_dec ? dec_poly_add_is_sub : 1'b0),
+                poly_owner_dec ? dec_poly_add_is_sub :
+                poly_owner_kg  ? kg_poly_add_is_sub  : 1'b0),
         .done(shared_add_done),
         .host_sel(poly_owner_enc ? kpke_enc_add_host_sel :
-                  poly_owner_dec ? dec_poly_add_host_sel : 1'b0),
+                  poly_owner_dec ? dec_poly_add_host_sel :
+                  poly_owner_kg  ? kg_poly_add_host_sel  : 1'b0),
         .host_we(poly_owner_enc ? kpke_enc_add_host_we :
-                 poly_owner_dec ? dec_poly_add_host_we : 1'b0),
+                 poly_owner_dec ? dec_poly_add_host_we :
+                 poly_owner_kg  ? kg_poly_add_host_we  : 1'b0),
         .host_addr(poly_owner_enc ? kpke_enc_add_host_addr :
-                   poly_owner_dec ? dec_poly_add_host_addr : 8'd0),
+                   poly_owner_dec ? dec_poly_add_host_addr :
+                   poly_owner_kg  ? kg_poly_add_host_addr  : 8'd0),
         .host_din(poly_owner_enc ? kpke_enc_add_host_din :
-                  poly_owner_dec ? dec_poly_add_host_din : 16'd0),
+                  poly_owner_dec ? dec_poly_add_host_din :
+                  poly_owner_kg  ? kg_poly_add_host_din  : 16'd0),
         .host_dout(shared_add_host_dout)
     );
 
@@ -676,6 +712,8 @@ module ml_kem_top #
     assign kpke_enc_add_host_dout = poly_owner_enc ? shared_add_host_dout : 16'd0;
     assign dec_poly_add_done      = poly_owner_dec ? shared_add_done      : 1'b0;
     assign dec_poly_add_host_dout = poly_owner_dec ? shared_add_host_dout : 16'd0;
+    assign kg_poly_add_done       = poly_owner_kg  ? shared_add_done      : 1'b0;
+    assign kg_poly_add_host_dout  = poly_owner_kg  ? shared_add_host_dout : 16'd0;
 
     wire        shared_comp_done, shared_comp_byte_we;
     wire [6:0]  shared_comp_coeff_addr;
@@ -881,7 +919,8 @@ module ml_kem_top #
     generate
         if (BYPASS_CRYPTO == 0) begin : g_crypto_real
             ml_kem_keygen #(
-                .HAS_INTERNAL_KECCAK(0)
+                .HAS_INTERNAL_KECCAK(0),
+                .HAS_INTERNAL_POLY(0)
             ) u_keygen (
                 .clk(clk),
                 .rst_n(rst_n),
@@ -903,7 +942,29 @@ module ml_kem_top #
                 .ext_k_din_ready(kg_k_din_ready),
                 .ext_k_dout(kg_k_dout),
                 .ext_k_dout_valid(kg_k_dout_valid),
-                .ext_k_dout_ready(kg_k_dout_ready)
+                .ext_k_dout_ready(kg_k_dout_ready),
+                // Step R3: shared poly engine ports
+                .ext_ntt_start    (kg_poly_ntt_start),
+                .ext_ntt_done     (kg_poly_ntt_done),
+                .ext_ntt_host_we  (kg_poly_ntt_host_we),
+                .ext_ntt_host_addr(kg_poly_ntt_host_addr),
+                .ext_ntt_host_din (kg_poly_ntt_host_din),
+                .ext_ntt_host_dout(kg_poly_ntt_host_dout),
+                .ext_pw_start     (kg_poly_pw_start),
+                .ext_pw_done      (kg_poly_pw_done),
+                .ext_pw_host_sel  (kg_poly_pw_host_sel),
+                .ext_pw_host_we   (kg_poly_pw_host_we),
+                .ext_pw_host_addr (kg_poly_pw_host_addr),
+                .ext_pw_host_din  (kg_poly_pw_host_din),
+                .ext_pw_host_dout (kg_poly_pw_host_dout),
+                .ext_add_start    (kg_poly_add_start),
+                .ext_add_is_sub   (kg_poly_add_is_sub),
+                .ext_add_done     (kg_poly_add_done),
+                .ext_add_host_sel (kg_poly_add_host_sel),
+                .ext_add_host_we  (kg_poly_add_host_we),
+                .ext_add_host_addr(kg_poly_add_host_addr),
+                .ext_add_host_din (kg_poly_add_host_din),
+                .ext_add_host_dout(kg_poly_add_host_dout)
             );
 
             ml_kem_encaps #(
