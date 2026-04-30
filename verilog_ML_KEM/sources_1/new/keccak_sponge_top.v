@@ -16,11 +16,25 @@ module keccak_sponge_top (
     input  wire         init,
     input  wire [1:0]   hash_type,
     input  wire         finalize,
+    // R-new-A Phase B: latched on init. 0 = byte absorb (legacy din path),
+    // 1 = lane absorb (new lane_din path, 8 bytes/cycle). Caller must use
+    // a single mode for the entire absorb session up to finalize. Padding
+    // and squeeze stay byte-level in Phase B (squeeze becomes lane in C).
+    input  wire         absorb_lane_mode,
 
-    // Data Input
+    // Data Input — byte path (legacy)
     input  wire [7:0]   din,
     input  wire         din_valid,
     output wire         din_ready,
+
+    // R-new-A Phase B: lane absorb path. lane_din carries one 64-bit lane
+    // per cycle; lane_din_ready asserts only when the FSM is in
+    // ST_ABSORB_LANE and finalize hasn't fired. Caller must feed exactly
+    // (msg_len_bytes / 8) lanes — non-multiple-of-8 messages still need
+    // the byte path.
+    input  wire [63:0]  lane_din,
+    input  wire         lane_din_valid,
+    output wire         lane_din_ready,
 
     // Data Output
     output wire [7:0]   dout,
@@ -48,6 +62,16 @@ module keccak_sponge_top (
     reg  [7:0]  core_xor_byte_data;
     wire [7:0]  core_byte_dout;
 
+    // R-new-A Phase B: lane-level absorb interface to core. core_xor_lane_*
+    // are driven from ST_ABSORB_LANE state. mode_lane latches absorb_lane_mode
+    // on init so transitions out of permute (ST_WAIT_ABSORB → ABSORB or
+    // ABSORB_LANE) and out of init (ST_INIT → ABSORB or ABSORB_LANE) know
+    // which path the caller picked.
+    reg         core_xor_lane_we;
+    reg  [4:0]  core_xor_lane_addr;
+    reg  [63:0] core_xor_lane_data;
+    reg         mode_lane;
+
     keccak_f1600_core u_keccak_core (
         .clk(clk),
         .rst_n(rst_n),
@@ -59,12 +83,12 @@ module keccak_sponge_top (
         .xor_byte_addr(core_xor_byte_addr),
         .xor_byte_data(core_xor_byte_data),
         .byte_dout(core_byte_dout),
-        // R-new-A Phase A: lane interface present on core but unused in this
-        // legacy byte-mode sponge. Future lane-mode sponge replaces this
-        // instantiation. Tying we=0 leaves the lane absorb path inactive.
-        .xor_lane_we(1'b0),
-        .xor_lane_addr(5'd0),
-        .xor_lane_data(64'd0),
+        // R-new-A Phase B: lane absorb path now driven from FSM. Phase C
+        // will add a lane squeeze read using lane_dout — for now it stays
+        // open and squeeze still uses byte_dout.
+        .xor_lane_we(core_xor_lane_we),
+        .xor_lane_addr(core_xor_lane_addr),
+        .xor_lane_data(core_xor_lane_data),
         .lane_dout(),
         .state_out(),                          // unused — sponge accesses bytes only
         .done(core_done)
@@ -82,12 +106,15 @@ module keccak_sponge_top (
     localparam ST_PAD_LAST      = 4'd5;
     localparam ST_WAIT_SQUEEZE  = 4'd6;
     localparam ST_SQUEEZE       = 4'd7;
+    // R-new-A Phase B
+    localparam ST_ABSORB_LANE   = 4'd8;
 
     reg [3:0] state;
 
-    assign din_ready  = (state == ST_ABSORB) && !finalize;
-    assign dout_valid = (state == ST_SQUEEZE);
-    assign dout       = core_byte_dout;        // combinational byte read of A at byte_idx
+    assign din_ready       = (state == ST_ABSORB)      && !finalize;
+    assign lane_din_ready  = (state == ST_ABSORB_LANE) && !finalize;
+    assign dout_valid      = (state == ST_SQUEEZE);
+    assign dout            = core_byte_dout;        // combinational byte read of A at byte_idx
 
     // Combinational core-control signals based on current sponge state.
     // Defaults below ensure no spurious XOR or init pulses outside the
@@ -97,6 +124,10 @@ module keccak_sponge_top (
         core_xor_we        = 1'b0;
         core_xor_byte_addr = byte_idx;          // default: byte_idx (used by absorb + squeeze read)
         core_xor_byte_data = 8'd0;
+        // R-new-A Phase B: lane signals default to inactive
+        core_xor_lane_we   = 1'b0;
+        core_xor_lane_addr = byte_idx[7:3];     // lane index = byte_idx / 8
+        core_xor_lane_data = 64'd0;
 
         case (state)
             ST_INIT: begin
@@ -108,6 +139,14 @@ module keccak_sponge_top (
                     core_xor_we        = 1'b1;
                     core_xor_byte_data = din;
                     // core_xor_byte_addr defaults to byte_idx
+                end
+            end
+
+            ST_ABSORB_LANE: begin
+                if (lane_din_valid && lane_din_ready) begin
+                    core_xor_lane_we   = 1'b1;
+                    core_xor_lane_addr = byte_idx[7:3];
+                    core_xor_lane_data = lane_din;
                 end
             end
 
@@ -135,11 +174,13 @@ module keccak_sponge_top (
             state      <= ST_IDLE;
             byte_idx   <= 0;
             core_start <= 0;
+            mode_lane  <= 1'b0;
         end
         else if (init) begin
             state      <= ST_INIT;
             byte_idx   <= 0;
             core_start <= 0;
+            mode_lane  <= absorb_lane_mode;     // R-new-A Phase B: latch on init
         end
         else begin
             case (state)
@@ -150,7 +191,9 @@ module keccak_sponge_top (
                 ST_INIT: begin
                     // 1-cycle pulse: combinational core_init=1 has been driven
                     // for this cycle, A will be cleared at the next posedge.
-                    state <= ST_ABSORB;
+                    // R-new-A Phase B: branch into byte or lane absorb based
+                    // on the latched mode.
+                    state <= mode_lane ? ST_ABSORB_LANE : ST_ABSORB;
                 end
 
                 ST_ABSORB: begin
@@ -170,6 +213,28 @@ module keccak_sponge_top (
                             state      <= ST_WAIT_ABSORB;
                         end else begin
                             byte_idx <= byte_idx + 1;
+                        end
+                    end
+                end
+
+                ST_ABSORB_LANE: begin
+                    // R-new-A Phase B: lane absorb path. Combinational
+                    // core_xor_lane_we drives XOR of one full 64-bit lane
+                    // per cycle; byte_idx advances by 8. When byte_idx
+                    // reaches rate-8 (last lane of the block), trigger
+                    // permutation. Padding (byte-level) still works because
+                    // byte_idx is always a multiple of 8 in lane mode and
+                    // points to the next-byte-to-absorb position.
+                    if (finalize) begin
+                        state <= ST_PAD_DOMAIN;
+                    end
+                    else if (lane_din_valid && lane_din_ready) begin
+                        if (byte_idx == rate - 8'd8) begin
+                            byte_idx   <= 0;
+                            core_start <= 1;
+                            state      <= ST_WAIT_ABSORB;
+                        end else begin
+                            byte_idx <= byte_idx + 8'd8;
                         end
                     end
                 end
@@ -194,7 +259,9 @@ module keccak_sponge_top (
                     core_start <= 0;
                     if (core_done) begin
                         // No state capture needed — A is the canonical state.
-                        state <= ST_ABSORB;
+                        // R-new-A Phase B: return to whichever absorb mode
+                        // the caller selected at init.
+                        state <= mode_lane ? ST_ABSORB_LANE : ST_ABSORB;
                     end
                 end
 

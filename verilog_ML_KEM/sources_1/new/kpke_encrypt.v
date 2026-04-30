@@ -476,9 +476,13 @@ module kpke_encrypt #(
                 .init(init_keccak),
                 .hash_type(hash_type),
                 .finalize(finalize_keccak),
+                .absorb_lane_mode(1'b0),
                 .din(k_din),
                 .din_valid(k_din_valid),
                 .din_ready(k_din_ready),
+                .lane_din(64'd0),
+                .lane_din_valid(1'b0),
+                .lane_din_ready(),
                 .dout(k_dout),
                 .dout_valid(k_dout_valid),
                 .dout_ready(k_dout_ready)

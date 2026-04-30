@@ -427,9 +427,14 @@ module ml_kem_top #
         .init(top_k_init),
         .hash_type(top_k_hash_type),
         .finalize(top_k_finalize),
+        // R-new-A Phase B: byte mode (lane mode unused in current pipeline)
+        .absorb_lane_mode(1'b0),
         .din(top_k_din),
         .din_valid(top_k_din_valid),
         .din_ready(top_k_din_ready),
+        .lane_din(64'd0),
+        .lane_din_valid(1'b0),
+        .lane_din_ready(),
         .dout(top_k_dout),
         .dout_valid(top_k_dout_valid),
         .dout_ready(top_k_dout_ready)

@@ -17,12 +17,20 @@ module tb_keccak_sponge_top();
     logic         dout_valid;
     logic         dout_ready;
 
+    // R-new-A Phase B: lane absorb interface
+    logic         absorb_lane_mode;
+    logic [63:0]  lane_din;
+    logic         lane_din_valid;
+    logic         lane_din_ready;
+
     // =========================================================
     // 2. DEVICE UNDER TEST (DUT)
     // =========================================================
     keccak_sponge_top dut (
         .clk(clk), .rst_n(rst_n), .init(init), .hash_type(hash_type), .finalize(finalize),
+        .absorb_lane_mode(absorb_lane_mode),
         .din(din), .din_valid(din_valid), .din_ready(din_ready),
+        .lane_din(lane_din), .lane_din_valid(lane_din_valid), .lane_din_ready(lane_din_ready),
         .dout(dout), .dout_valid(dout_valid), .dout_ready(dout_ready)
     );
 
@@ -95,10 +103,24 @@ module tb_keccak_sponge_top();
     // =========================================================
     task automatic start_hash(input logic [1:0] mode);
         @(negedge clk);
-        init        = 1;
-        hash_type   = mode;
-        is_running  = 1;
-        cycle_count = 0;
+        init             = 1;
+        hash_type        = mode;
+        absorb_lane_mode = 1'b0;        // byte mode for legacy tests
+        is_running       = 1;
+        cycle_count      = 0;
+        @(posedge clk);
+        @(negedge clk);
+        init = 0;
+    endtask
+
+    // R-new-A Phase B: lane-mode init (latches absorb_lane_mode=1)
+    task automatic start_hash_lane(input logic [1:0] mode);
+        @(negedge clk);
+        init             = 1;
+        hash_type        = mode;
+        absorb_lane_mode = 1'b1;
+        is_running       = 1;
+        cycle_count      = 0;
         @(posedge clk);
         @(negedge clk);
         init = 0;
@@ -140,11 +162,40 @@ module tb_keccak_sponge_top();
         din_valid = 0;
     endtask
 
+    // R-new-A Phase B: feed the same 200-byte stream as feed_message_200 but
+    // packed into 25 lanes (LSB-first within each lane, matching Keccak's
+    // byte→lane mapping where byte at position k of lane = A[lane][k*8 +: 8]).
+    // Lane i = {byte[i*8+7], ..., byte[i*8+0]}.
+    task automatic feed_message_200_lane();
+        integer i;
+        logic [7:0] b [0:7];
+        for (i = 0; i < 25; i = i + 1) begin
+            b[0] = (i*8 + 0);
+            b[1] = (i*8 + 1);
+            b[2] = (i*8 + 2);
+            b[3] = (i*8 + 3);
+            b[4] = (i*8 + 4);
+            b[5] = (i*8 + 5);
+            b[6] = (i*8 + 6);
+            b[7] = (i*8 + 7);
+            @(negedge clk);
+            lane_din       = {b[7], b[6], b[5], b[4], b[3], b[2], b[1], b[0]};
+            lane_din_valid = 1;
+            do begin
+                @(posedge clk);
+            end while (!lane_din_ready);
+        end
+        @(negedge clk);
+        lane_din_valid = 0;
+    endtask
+
     integer i, errors;
 
     initial begin
-        clk = 0; rst_n = 0; init = 0; hash_type = 0; finalize = 0; din = 0; 
+        clk = 0; rst_n = 0; init = 0; hash_type = 0; finalize = 0; din = 0;
         din_valid = 0; dout_ready = 1; is_running = 0; cycle_count = 0;
+        // R-new-A Phase B: lane interface idle by default
+        absorb_lane_mode = 0; lane_din = 0; lane_din_valid = 0;
 
         $display("=================================================");
         $display("   STARTING BATCH TEST: KECCAK SPONGE (4 MODES)  ");
@@ -271,8 +322,34 @@ module tb_keccak_sponge_top();
         if (errors == 0) $display(">> [SUCCESS] MULTI-BLOCK SQUEEZE PASSED!");
         else $finish;
 
+        // --- R-new-A PHASE B: LANE-MODE 200-BYTE SHAKE128 ABSORB ---
+        // Same 0..199 byte stream as testcase 5, but absorbed via the
+        // lane_din path (25 lanes, no byte feeds). Squeeze stays on byte
+        // path. Output must match exp_multi_absorb byte-for-byte —
+        // semantic equivalence proves byte-mode and lane-mode produce
+        // the same Keccak state.
+        $display("-------------------------------------------------");
+        $display(">> RUNNING TESTCASE 7: R-new-A Phase B LANE ABSORB (SHAKE128, 200 bytes / 25 lanes)");
+        start_hash_lane(2'b00);
+        feed_message_200_lane();
+        pulse_finalize();
+
+        errors = 0;
+        for (i = 0; i < 32; i = i + 1) begin
+            do begin @(posedge clk); end while (!dout_valid);
+            if (dout !== exp_multi_absorb[i]) begin
+                $display("   [ERROR] Byte %0d: Expected %02x, Got %02x", i, exp_multi_absorb[i], dout);
+                errors = errors + 1;
+            end
+        end
+        is_running = 0;
+        $display("   [PERFORMANCE] LANE ABSORB generated 32 bytes in %0d clock cycles.", cycle_count);
+        if (errors == 0) $display(">> [SUCCESS] R-new-A Phase B LANE ABSORB PASSED!");
+        else $finish;
+
         $display("=================================================");
-        $display("   ALL 6 TESTCASES PASSED FLAWLESSLY! CONGRATS!  ");
+        $display("   ALL 7 TESTCASES PASSED FLAWLESSLY! CONGRATS!  ");
+        $display("   (Phase B lane absorb verified equivalent to byte mode)");
         $display("=================================================");
         #50; $finish;
     end
