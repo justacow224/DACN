@@ -307,6 +307,7 @@ module ml_kem_decaps #(
                 .hash_type(shared_k_hash_type),
                 .finalize(shared_k_finalize),
                 .absorb_lane_mode(1'b0),
+                .squeeze_lane_mode(1'b0),
                 .din(shared_k_din),
                 .din_valid(shared_k_din_valid),
                 .din_ready(shared_k_din_ready),
@@ -315,7 +316,10 @@ module ml_kem_decaps #(
                 .lane_din_ready(),
                 .dout(shared_k_dout),
                 .dout_valid(shared_k_dout_valid),
-                .dout_ready(shared_k_dout_ready)
+                .dout_ready(shared_k_dout_ready),
+                .lane_dout(),
+                .lane_dout_valid(),
+                .lane_dout_ready(1'b0)
             );
 
             assign ext_k_init       = 1'b0;

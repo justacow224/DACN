@@ -23,15 +23,22 @@ module tb_keccak_sponge_top();
     logic         lane_din_valid;
     logic         lane_din_ready;
 
+    // R-new-A Phase C: lane squeeze interface
+    logic         squeeze_lane_mode;
+    logic [63:0]  lane_dout;
+    logic         lane_dout_valid;
+    logic         lane_dout_ready;
+
     // =========================================================
     // 2. DEVICE UNDER TEST (DUT)
     // =========================================================
     keccak_sponge_top dut (
         .clk(clk), .rst_n(rst_n), .init(init), .hash_type(hash_type), .finalize(finalize),
-        .absorb_lane_mode(absorb_lane_mode),
+        .absorb_lane_mode(absorb_lane_mode), .squeeze_lane_mode(squeeze_lane_mode),
         .din(din), .din_valid(din_valid), .din_ready(din_ready),
         .lane_din(lane_din), .lane_din_valid(lane_din_valid), .lane_din_ready(lane_din_ready),
-        .dout(dout), .dout_valid(dout_valid), .dout_ready(dout_ready)
+        .dout(dout), .dout_valid(dout_valid), .dout_ready(dout_ready),
+        .lane_dout(lane_dout), .lane_dout_valid(lane_dout_valid), .lane_dout_ready(lane_dout_ready)
     );
 
     // =========================================================
@@ -103,24 +110,40 @@ module tb_keccak_sponge_top();
     // =========================================================
     task automatic start_hash(input logic [1:0] mode);
         @(negedge clk);
-        init             = 1;
-        hash_type        = mode;
-        absorb_lane_mode = 1'b0;        // byte mode for legacy tests
-        is_running       = 1;
-        cycle_count      = 0;
+        init              = 1;
+        hash_type         = mode;
+        absorb_lane_mode  = 1'b0;       // byte mode for legacy tests
+        squeeze_lane_mode = 1'b0;
+        is_running        = 1;
+        cycle_count       = 0;
         @(posedge clk);
         @(negedge clk);
         init = 0;
     endtask
 
-    // R-new-A Phase B: lane-mode init (latches absorb_lane_mode=1)
+    // R-new-A Phase B: lane-absorb init (latches absorb_lane_mode=1, byte squeeze)
     task automatic start_hash_lane(input logic [1:0] mode);
         @(negedge clk);
-        init             = 1;
-        hash_type        = mode;
-        absorb_lane_mode = 1'b1;
-        is_running       = 1;
-        cycle_count      = 0;
+        init              = 1;
+        hash_type         = mode;
+        absorb_lane_mode  = 1'b1;
+        squeeze_lane_mode = 1'b0;
+        is_running        = 1;
+        cycle_count       = 0;
+        @(posedge clk);
+        @(negedge clk);
+        init = 0;
+    endtask
+
+    // R-new-A Phase C: byte-absorb + lane-squeeze init
+    task automatic start_hash_lane_sq(input logic [1:0] mode);
+        @(negedge clk);
+        init              = 1;
+        hash_type         = mode;
+        absorb_lane_mode  = 1'b0;
+        squeeze_lane_mode = 1'b1;
+        is_running        = 1;
+        cycle_count       = 0;
         @(posedge clk);
         @(negedge clk);
         init = 0;
@@ -194,8 +217,10 @@ module tb_keccak_sponge_top();
     initial begin
         clk = 0; rst_n = 0; init = 0; hash_type = 0; finalize = 0; din = 0;
         din_valid = 0; dout_ready = 1; is_running = 0; cycle_count = 0;
-        // R-new-A Phase B: lane interface idle by default
+        // R-new-A Phase B: lane absorb interface idle by default
         absorb_lane_mode = 0; lane_din = 0; lane_din_valid = 0;
+        // R-new-A Phase C: lane squeeze interface idle by default
+        squeeze_lane_mode = 0; lane_dout_ready = 1;
 
         $display("=================================================");
         $display("   STARTING BATCH TEST: KECCAK SPONGE (4 MODES)  ");
@@ -347,9 +372,43 @@ module tb_keccak_sponge_top();
         if (errors == 0) $display(">> [SUCCESS] R-new-A Phase B LANE ABSORB PASSED!");
         else $finish;
 
+        // --- R-new-A PHASE C: BYTE-ABSORB + LANE-SQUEEZE 200B SHAKE128 ---
+        // Same "abc" message + SHAKE128 setup as testcase 6, but squeeze
+        // via lane_dout (25 lanes / 200 bytes). Each lane is packed
+        // {byte[7], byte[6], ..., byte[0]} from exp_multi_squeeze and
+        // compared against lane_dout combinational read. Verifies Phase C
+        // squeeze produces byte-for-byte identical output to byte squeeze.
+        $display("-------------------------------------------------");
+        $display(">> RUNNING TESTCASE 8: R-new-A Phase C LANE SQUEEZE (SHAKE128, 200 bytes / 25 lanes)");
+        start_hash_lane_sq(2'b00);
+        feed_message();
+        pulse_finalize();
+
+        errors = 0;
+        for (i = 0; i < 25; i = i + 1) begin
+            logic [63:0] expected_lane;
+            do begin @(posedge clk); end while (!lane_dout_valid);
+            expected_lane = {exp_multi_squeeze[i*8 + 7],
+                             exp_multi_squeeze[i*8 + 6],
+                             exp_multi_squeeze[i*8 + 5],
+                             exp_multi_squeeze[i*8 + 4],
+                             exp_multi_squeeze[i*8 + 3],
+                             exp_multi_squeeze[i*8 + 2],
+                             exp_multi_squeeze[i*8 + 1],
+                             exp_multi_squeeze[i*8 + 0]};
+            if (lane_dout !== expected_lane) begin
+                $display("   [ERROR] Lane %0d: Expected %016h, Got %016h", i, expected_lane, lane_dout);
+                errors = errors + 1;
+            end
+        end
+        is_running = 0;
+        $display("   [PERFORMANCE] LANE SQUEEZE generated 25 lanes (200 bytes) in %0d clock cycles.", cycle_count);
+        if (errors == 0) $display(">> [SUCCESS] R-new-A Phase C LANE SQUEEZE PASSED!");
+        else $finish;
+
         $display("=================================================");
-        $display("   ALL 7 TESTCASES PASSED FLAWLESSLY! CONGRATS!  ");
-        $display("   (Phase B lane absorb verified equivalent to byte mode)");
+        $display("   ALL 8 TESTCASES PASSED FLAWLESSLY! CONGRATS!  ");
+        $display("   (Phase B lane absorb + Phase C lane squeeze verified)");
         $display("=================================================");
         #50; $finish;
     end

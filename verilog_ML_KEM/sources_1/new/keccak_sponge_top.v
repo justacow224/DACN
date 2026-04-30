@@ -18,9 +18,13 @@ module keccak_sponge_top (
     input  wire         finalize,
     // R-new-A Phase B: latched on init. 0 = byte absorb (legacy din path),
     // 1 = lane absorb (new lane_din path, 8 bytes/cycle). Caller must use
-    // a single mode for the entire absorb session up to finalize. Padding
-    // and squeeze stay byte-level in Phase B (squeeze becomes lane in C).
+    // a single mode for the entire absorb session up to finalize.
     input  wire         absorb_lane_mode,
+    // R-new-A Phase C: latched on init. 0 = byte squeeze (legacy dout path),
+    // 1 = lane squeeze (new lane_dout path, 8 bytes/cycle). Independent of
+    // absorb_lane_mode — any combination is legal. Output count must be a
+    // multiple of 8 in lane mode; non-multiple consumers stay on byte path.
+    input  wire         squeeze_lane_mode,
 
     // Data Input — byte path (legacy)
     input  wire [7:0]   din,
@@ -36,10 +40,17 @@ module keccak_sponge_top (
     input  wire         lane_din_valid,
     output wire         lane_din_ready,
 
-    // Data Output
+    // Data Output — byte path (legacy)
     output wire [7:0]   dout,
     output wire         dout_valid,
-    input  wire         dout_ready
+    input  wire         dout_ready,
+
+    // R-new-A Phase C: lane squeeze path. lane_dout returns 64 bits of A
+    // per cycle (combinational read of A[byte_idx/8] from the core).
+    // lane_dout_valid asserts only when the FSM is in ST_SQUEEZE_LANE.
+    output wire [63:0]  lane_dout,
+    output wire         lane_dout_valid,
+    input  wire         lane_dout_ready
 );
 
     wire [7:0] rate = (hash_type == 2'b00) ? 8'd168 :
@@ -71,6 +82,8 @@ module keccak_sponge_top (
     reg  [4:0]  core_xor_lane_addr;
     reg  [63:0] core_xor_lane_data;
     reg         mode_lane;
+    // R-new-A Phase C: latched squeeze mode (1 = lane-rate squeeze)
+    reg         mode_lane_sq;
 
     keccak_f1600_core u_keccak_core (
         .clk(clk),
@@ -83,13 +96,13 @@ module keccak_sponge_top (
         .xor_byte_addr(core_xor_byte_addr),
         .xor_byte_data(core_xor_byte_data),
         .byte_dout(core_byte_dout),
-        // R-new-A Phase B: lane absorb path now driven from FSM. Phase C
-        // will add a lane squeeze read using lane_dout — for now it stays
-        // open and squeeze still uses byte_dout.
+        // R-new-A Phase B: lane absorb path driven from FSM.
+        // R-new-A Phase C: lane_dout exposed for ST_SQUEEZE_LANE read
+        // (combinational view of A[core_xor_lane_addr]).
         .xor_lane_we(core_xor_lane_we),
         .xor_lane_addr(core_xor_lane_addr),
         .xor_lane_data(core_xor_lane_data),
-        .lane_dout(),
+        .lane_dout(lane_dout),
         .state_out(),                          // unused — sponge accesses bytes only
         .done(core_done)
     );
@@ -108,6 +121,8 @@ module keccak_sponge_top (
     localparam ST_SQUEEZE       = 4'd7;
     // R-new-A Phase B
     localparam ST_ABSORB_LANE   = 4'd8;
+    // R-new-A Phase C
+    localparam ST_SQUEEZE_LANE  = 4'd9;
 
     reg [3:0] state;
 
@@ -115,6 +130,8 @@ module keccak_sponge_top (
     assign lane_din_ready  = (state == ST_ABSORB_LANE) && !finalize;
     assign dout_valid      = (state == ST_SQUEEZE);
     assign dout            = core_byte_dout;        // combinational byte read of A at byte_idx
+    assign lane_dout_valid = (state == ST_SQUEEZE_LANE);
+    // lane_dout itself is wired directly to core's combinational lane_dout above.
 
     // Combinational core-control signals based on current sponge state.
     // Defaults below ensure no spurious XOR or init pulses outside the
@@ -171,16 +188,18 @@ module keccak_sponge_top (
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            state      <= ST_IDLE;
-            byte_idx   <= 0;
-            core_start <= 0;
-            mode_lane  <= 1'b0;
+            state         <= ST_IDLE;
+            byte_idx      <= 0;
+            core_start    <= 0;
+            mode_lane     <= 1'b0;
+            mode_lane_sq  <= 1'b0;
         end
         else if (init) begin
-            state      <= ST_INIT;
-            byte_idx   <= 0;
-            core_start <= 0;
-            mode_lane  <= absorb_lane_mode;     // R-new-A Phase B: latch on init
+            state         <= ST_INIT;
+            byte_idx      <= 0;
+            core_start    <= 0;
+            mode_lane     <= absorb_lane_mode;     // R-new-A Phase B: latch on init
+            mode_lane_sq  <= squeeze_lane_mode;    // R-new-A Phase C: latch on init
         end
         else begin
             case (state)
@@ -269,7 +288,9 @@ module keccak_sponge_top (
                     core_start <= 0;
                     if (core_done) begin
                         byte_idx <= 0;
-                        state    <= ST_SQUEEZE;
+                        // R-new-A Phase C: branch into byte or lane squeeze
+                        // based on the latched mode.
+                        state    <= mode_lane_sq ? ST_SQUEEZE_LANE : ST_SQUEEZE;
                     end
                 end
 
@@ -282,6 +303,23 @@ module keccak_sponge_top (
                             state      <= ST_WAIT_SQUEEZE;
                         end else begin
                             byte_idx <= byte_idx + 1;
+                        end
+                    end
+                end
+
+                ST_SQUEEZE_LANE: begin
+                    // R-new-A Phase C: lane squeeze. lane_dout combinationally
+                    // returns A[byte_idx/8] from the core. Caller pulls one
+                    // lane per cycle via lane_dout_valid/ready handshake.
+                    // When byte_idx reaches rate-8 (last lane of the squeezed
+                    // block), trigger another permutation for the next block.
+                    if (lane_dout_valid && lane_dout_ready) begin
+                        if (byte_idx == rate - 8'd8) begin
+                            byte_idx   <= 0;
+                            core_start <= 1;
+                            state      <= ST_WAIT_SQUEEZE;
+                        end else begin
+                            byte_idx <= byte_idx + 8'd8;
                         end
                     end
                 end
