@@ -124,82 +124,14 @@ module keccak_f1600_core (
         end
     endgenerate
 
-    // ============================================================
-    // Step R1: SECOND combinational round (unroll 2 rounds/cycle).
-    // Input is A_next (= round_idx round result); output is A_next2 (=
-    // round_idx+1 round result). Uses RC[round_idx+1] for the ι step.
-    // FSM writes A <= A_next2 every cycle, so the 24-round permutation
-    // completes in 12 cycles instead of 24 (-50% Keccak latency, biggest
-    // bottleneck after Steps 3.K0/K1).
-    // ============================================================
-
-    wire [63:0] current_RC2 = RC[round_idx + 5'd1];
-
-    wire [63:0] C2 [0:4];
-    wire [63:0] D2 [0:4];
-    wire [63:0] A_theta2 [0:24];
-    wire [63:0] A_next2  [0:24];
-
-    generate
-        for (x = 0; x < 5; x = x + 1) begin : gen_C2
-            assign C2[x] = A_next[x] ^ A_next[x+5] ^ A_next[x+10] ^ A_next[x+15] ^ A_next[x+20];
-        end
-        for (x = 0; x < 5; x = x + 1) begin : gen_D2
-            wire [63:0] c2_minus_1 = C2[(x+4)%5];
-            wire [63:0] c2_plus_1  = C2[(x+1)%5];
-            assign D2[x] = c2_minus_1 ^ {c2_plus_1[62:0], c2_plus_1[63:63]};
-        end
-        for (y = 0; y < 5; y = y + 1) begin : gen_theta2_y
-            for (x = 0; x < 5; x = x + 1) begin : gen_theta2_x
-                assign A_theta2[y*5 + x] = A_next[y*5 + x] ^ D2[x];
-            end
-        end
-    endgenerate
-
-    wire [63:0] B_rho_pi2 [0:24];
-    assign B_rho_pi2[0]  = A_theta2[0];
-    assign B_rho_pi2[10] = {A_theta2[1][62:0], A_theta2[1][63:63]};
-    assign B_rho_pi2[7]  = {A_theta2[10][60:0], A_theta2[10][63:61]};
-    assign B_rho_pi2[11] = {A_theta2[7][57:0], A_theta2[7][63:58]};
-    assign B_rho_pi2[17] = {A_theta2[11][53:0], A_theta2[11][63:54]};
-    assign B_rho_pi2[18] = {A_theta2[17][48:0], A_theta2[17][63:49]};
-    assign B_rho_pi2[3]  = {A_theta2[18][42:0], A_theta2[18][63:43]};
-    assign B_rho_pi2[5]  = {A_theta2[3][35:0], A_theta2[3][63:36]};
-    assign B_rho_pi2[16] = {A_theta2[5][27:0], A_theta2[5][63:28]};
-    assign B_rho_pi2[8]  = {A_theta2[16][18:0], A_theta2[16][63:19]};
-    assign B_rho_pi2[21] = {A_theta2[8][8:0], A_theta2[8][63:9]};
-    assign B_rho_pi2[24] = {A_theta2[21][61:0], A_theta2[21][63:62]};
-    assign B_rho_pi2[4]  = {A_theta2[24][49:0], A_theta2[24][63:50]};
-    assign B_rho_pi2[15] = {A_theta2[4][36:0], A_theta2[4][63:37]};
-    assign B_rho_pi2[23] = {A_theta2[15][22:0], A_theta2[15][63:23]};
-    assign B_rho_pi2[19] = {A_theta2[23][7:0], A_theta2[23][63:8]};
-    assign B_rho_pi2[13] = {A_theta2[19][55:0], A_theta2[19][63:56]};
-    assign B_rho_pi2[12] = {A_theta2[13][38:0], A_theta2[13][63:39]};
-    assign B_rho_pi2[2]  = {A_theta2[12][20:0], A_theta2[12][63:21]};
-    assign B_rho_pi2[20] = {A_theta2[2][1:0], A_theta2[2][63:2]};
-    assign B_rho_pi2[14] = {A_theta2[20][45:0], A_theta2[20][63:46]};
-    assign B_rho_pi2[22] = {A_theta2[14][24:0], A_theta2[14][63:25]};
-    assign B_rho_pi2[9]  = {A_theta2[22][2:0], A_theta2[22][63:3]};
-    assign B_rho_pi2[6]  = {A_theta2[9][43:0], A_theta2[9][63:44]};
-    assign B_rho_pi2[1]  = {A_theta2[6][19:0], A_theta2[6][63:20]};
-
-    generate
-        for (y = 0; y < 5; y = y + 1) begin : gen_chi2_y
-            for (x = 0; x < 5; x = x + 1) begin : gen_chi2_x
-                wire [63:0] b2_curr    = B_rho_pi2[y*5 + x];
-                wire [63:0] b2_plus_1  = B_rho_pi2[y*5 + ((x+1)%5)];
-                wire [63:0] b2_plus_2  = B_rho_pi2[y*5 + ((x+2)%5)];
-
-                wire [63:0] chi2_res = b2_curr ^ ((~b2_plus_1) & b2_plus_2);
-
-                if (x == 0 && y == 0) begin
-                    assign A_next2[0] = chi2_res ^ current_RC2;
-                end else begin
-                    assign A_next2[y*5 + x] = chi2_res;
-                end
-            end
-        end
-    endgenerate
+    // R1 (Keccak unroll 2 rounds/cycle) reverted: silicon-measured speedup
+    // was only ~0.7-1.1% per op (not the predicted -44%) because Keccak
+    // total cycles are dominated by byte streaming (1 cycle per absorb/
+    // squeeze byte ≈ 9k bytes per Encaps), not by the 24-cycle permutation
+    // (~80 perms × 24 = ~1,900 cycles, only ~3% of Keccak total). Halving
+    // permutation cycles saved <2k cycles per op while costing +2,441 LUT
+    // and -488 ps WNS — poor ROI. Reverted to single-round path; all R5/
+    // R4/R3 changes preserved.
 
     integer i;
     always @(posedge clk) begin
@@ -240,19 +172,17 @@ module keccak_f1600_core (
                 end
 
                 CALC: begin
-                    // Step R1: write A <= A_next2 (= 2 rounds advanced).
-                    // Loop runs round_idx = 0,2,4,...,22 → 12 iterations
-                    // for the full 24-round permutation.
+                    // Always update A from A_next (including the final round).
+                    // Single-round path: 24 cycles per permutation.
                     for (i = 0; i < 25; i = i + 1) begin
-                        A[i] <= A_next2[i];
+                        A[i] <= A_next[i];
                     end
 
-                    if (round_idx == 5'd22) begin
-                        // Final pair (rounds 22+23) just written; finish.
+                    if (round_idx == 23) begin
                         fsm_state <= IDLE;
                         done      <= 1;
                     end else begin
-                        round_idx <= round_idx + 5'd2;
+                        round_idx <= round_idx + 1;
                     end
                 end
             endcase
