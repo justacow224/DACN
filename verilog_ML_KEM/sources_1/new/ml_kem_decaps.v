@@ -725,44 +725,62 @@ module ml_kem_decaps #(
                     end
                 end
 
-                // K_reject = SHAKE-256(z || ct) — R-new-A Phase E3 lane absorb.
-                // Mixed source: 32B z_reg (4 lanes packed combinational) + 1088B
-                // ct_buf (136 lanes via BRAM read). Total 140 lanes. Saves ~3700
-                // cyc per Decaps vs the prior 4-state byte FSM (~4400 cyc).
+                // K_reject = SHAKE-256(z || ct).
+                //
+                // R-new-A Phase E3 DEFERRED: lane absorb path was sim-clean
+                // (tb_ml_kem_top Gate B PASS for vec #0 and vec #14 with full
+                // E1+E2+E3 stack) but FAILED on KR260 silicon — Decaps hangs
+                // with STATUS=0x0 (FSM deadlock) on every input. KeyGen and
+                // Encaps work 100/100 with the same ct_buf BRAM widening
+                // pattern (see Phase E1/E2), so the wrapper itself is fine.
+                // Suspected synth-time issue with the j_lane_din mux
+                // (z_packed combinational pack + var_k<4 mux + long
+                // hierarchical lane_din path). Root cause needs waveform
+                // trace; deferred for future re-enable. Lane infrastructure
+                // (ct_buf widening, z_packed, j_lane_din mux, ext_k_*lane*
+                // ports, ml_kem_top mux) preserved.
+                //
+                // Reverted to the legacy 4-state byte FSM (32B z_reg + 1088B
+                // ct_buf via byte BRAM read). ct_buf is still lane-wide BRAM
+                // but read via byte mux (1-cycle delayed byte-pos).
                 S_HASH_J_INIT: begin
                     init_keccak          <= 1'b1;
                     hash_type            <= 2'b01; // SHAKE-256
-                    absorb_lane_mode_reg <= 1'b1;  // Phase E3: lane absorb
-                    var_k                <= 12'd0; // lane index 0..139
-                    state                <= S_HASH_J_CT_WAIT;
+                    absorb_lane_mode_reg <= 1'b0;  // Phase E3 deferred: byte absorb
+                    var_k                <= 12'd0;
+                    k_din                <= z_reg[5'd0];
+                    k_din_valid          <= 1'b1;
+                    state                <= S_HASH_J_ABS;
                 end
 
-                // Lane request: kick BRAM read for ct lanes; z lanes already
-                // combinational from z_packed (via j_lane_din mux).
-                S_HASH_J_CT_WAIT: begin
-                    if (var_k >= 12'd4) begin
-                        ct_rd_en   <= 1'b1;
-                        ct_rd_addr <= {(var_k[7:0] - 8'd4), 3'd0};
-                    end
-                    state <= S_HASH_J_ABS;
-                end
-
-                // Lane absorb. Phase E1 handshake fix: gate on valid_reg too.
                 S_HASH_J_ABS: begin
-                    lane_din_valid_reg <= 1'b1;
-                    if (lane_din_valid_reg && lane_din_ready_w) begin
-                        lane_din_valid_reg <= 1'b0;
-                        if (var_k == 12'd139) begin
+                    k_din_valid <= 1'b1;
+                    if (k_din_ready) begin
+                        if (var_k == 12'd1119) begin
+                            k_din_valid <= 1'b0;
                             state <= S_HASH_J_FIN;
                         end else begin
-                            var_k <= var_k + 12'd1;
-                            state <= S_HASH_J_CT_WAIT;
+                            if (var_k < 12'd31) begin
+                                var_k <= var_k + 12'd1;
+                                k_din <= z_reg[var_k[4:0] + 5'd1];
+                            end else begin
+                                var_k    <= var_k + 12'd1;
+                                ct_rd_en <= 1'b1;
+                                ct_rd_addr <= var_k[10:0] - 11'd31;
+                                state    <= S_HASH_J_CT_WAIT;
+                            end
                         end
                     end
                 end
 
-                // Legacy state retained as no-op (lane FSM uses INIT/CT_WAIT/ABS).
-                S_HASH_J_CT_SEND: state <= S_HASH_J_ABS;
+                S_HASH_J_CT_WAIT: begin
+                    state <= S_HASH_J_CT_SEND;
+                end
+
+                S_HASH_J_CT_SEND: begin
+                    k_din <= ct_rd_data;
+                    state <= S_HASH_J_ABS;
+                end
 
                 S_HASH_J_FIN: begin
                     finalize_keccak  <= 1'b1;
