@@ -126,6 +126,24 @@ module keccak_sponge_top (
 
     reg [3:0] state;
 
+    // R-new-A D2 fix: defer init pulse when core is mid-permute. Without this,
+    // an init pulse arriving while core's fsm_state == CALC is silently
+    // ignored by the core (CALC has no init-handling branch). The sponge
+    // would transition to ST_INIT then ST_ABSORB while the core's A array
+    // still holds the in-flight permute residue → next absorb XORs into a
+    // non-zero A → wrong hash output. Manifested as input-dependent ct
+    // mismatch on Encaps vec #14 (and ~7/100 KAT) when D2 PRF lane squeeze
+    // is active, because lane-mode timing aligns the init pulse with a
+    // mid-CALC permute. Byte mode happened to miss the alignment.
+    //
+    // Fix: latch init in pending_init when fired during ST_WAIT_ABSORB or
+    // ST_WAIT_SQUEEZE. The pending init is then applied (via the same
+    // ST_INIT transition) once the in-flight permute completes (core_done).
+    reg pending_init_q;
+    reg pending_absorb_lane_mode;
+    reg pending_squeeze_lane_mode;
+    wire init_in_wait = init && (state == ST_WAIT_ABSORB || state == ST_WAIT_SQUEEZE);
+
     assign din_ready       = (state == ST_ABSORB)      && !finalize;
     assign lane_din_ready  = (state == ST_ABSORB_LANE) && !finalize;
     assign dout_valid      = (state == ST_SQUEEZE);
@@ -188,18 +206,41 @@ module keccak_sponge_top (
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            state         <= ST_IDLE;
-            byte_idx      <= 0;
-            core_start    <= 0;
-            mode_lane     <= 1'b0;
-            mode_lane_sq  <= 1'b0;
+            state                      <= ST_IDLE;
+            byte_idx                   <= 0;
+            core_start                 <= 0;
+            mode_lane                  <= 1'b0;
+            mode_lane_sq               <= 1'b0;
+            pending_init_q             <= 1'b0;
+            pending_absorb_lane_mode   <= 1'b0;
+            pending_squeeze_lane_mode  <= 1'b0;
         end
-        else if (init) begin
-            state         <= ST_INIT;
-            byte_idx      <= 0;
-            core_start    <= 0;
-            mode_lane     <= absorb_lane_mode;     // R-new-A Phase B: latch on init
-            mode_lane_sq  <= squeeze_lane_mode;    // R-new-A Phase C: latch on init
+        else if (init && !init_in_wait) begin
+            // Safe path: init fires when sponge is not waiting for permute.
+            // Either ST_IDLE/ST_ABSORB/ST_SQUEEZE/etc — core is in IDLE so
+            // the core_init pulse will clear A correctly.
+            state            <= ST_INIT;
+            byte_idx         <= 0;
+            core_start       <= 0;
+            mode_lane        <= absorb_lane_mode;     // R-new-A Phase B: latch on init
+            mode_lane_sq     <= squeeze_lane_mode;    // R-new-A Phase C: latch on init
+            pending_init_q   <= 1'b0;
+        end
+        else if (init_in_wait) begin
+            // R-new-A D2 fix: init fired while permute is in flight.
+            // Latch the request and apply when core completes.
+            pending_init_q             <= 1'b1;
+            pending_absorb_lane_mode   <= absorb_lane_mode;
+            pending_squeeze_lane_mode  <= squeeze_lane_mode;
+        end
+        else if (pending_init_q && core_done) begin
+            // Apply latched init now that the in-flight permute finished.
+            state            <= ST_INIT;
+            byte_idx         <= 0;
+            core_start       <= 0;
+            mode_lane        <= pending_absorb_lane_mode;
+            mode_lane_sq     <= pending_squeeze_lane_mode;
+            pending_init_q   <= 1'b0;
         end
         else begin
             case (state)
