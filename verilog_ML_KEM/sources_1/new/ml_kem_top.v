@@ -283,6 +283,11 @@ module ml_kem_top #
     wire [7:0]  enc_k_dout;
     wire        enc_k_dout_valid;
     wire        enc_k_dout_ready;
+    // R-new-A Phase E1: lane absorb fanin for encaps's H(ek) hash
+    wire        enc_k_absorb_lane_mode;
+    wire [63:0] enc_k_lane_din;
+    wire        enc_k_lane_din_valid;
+    wire        enc_k_lane_din_ready;
 
     wire        dec_k_init;
     wire [1:0]  dec_k_hash_type;
@@ -428,11 +433,18 @@ module ml_kem_top #
     // gates the kpke_encrypt-vs-others priority, so the lane mux mirrors it.
     wire        top_k_squeeze_lane_mode = encrypt_owns_keccak ? kpke_enc_k_squeeze_lane_mode : 1'b0;
     wire        top_k_lane_dout_ready   = encrypt_owns_keccak ? kpke_enc_k_lane_dout_ready   : 1'b0;
+    // R-new-A Phase E1: only encaps drives lane absorb (H(ek) SHA3-256).
+    // keygen/decaps absorbs not lane-converted yet (Phase E2). kpke_encrypt's
+    // absorb (PRF seed 33B) stays byte. So lane absorb is exclusive to encaps.
+    wire        top_k_absorb_lane_mode = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? enc_k_absorb_lane_mode : 1'b0;
+    wire [63:0] top_k_lane_din         = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? enc_k_lane_din         : 64'd0;
+    wire        top_k_lane_din_valid   = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? enc_k_lane_din_valid   : 1'b0;
     wire        top_k_din_ready;
     wire [7:0]  top_k_dout;
     wire        top_k_dout_valid;
     wire [63:0] top_k_lane_dout;
     wire        top_k_lane_dout_valid;
+    wire        top_k_lane_din_ready;
 
     keccak_sponge_top u_keccak (
         .clk(clk),
@@ -440,18 +452,18 @@ module ml_kem_top #
         .init(top_k_init),
         .hash_type(top_k_hash_type),
         .finalize(top_k_finalize),
-        // R-new-A Phase B: byte absorb (lane absorb unused — most absorbs are
-        // byte-aligned but not multiple-of-8; PRF seed is 33 bytes for ex.).
-        .absorb_lane_mode(1'b0),
+        // R-new-A Phase E1: lane absorb enabled when encaps requests it
+        // (H(ek) SHA3-256, 1184B = 148 lanes). Latched in sponge on each init.
+        .absorb_lane_mode(top_k_absorb_lane_mode),
         // R-new-A Phase D2: lane squeeze enabled when kpke_encrypt requests it
         // (PRF SHAKE-256). Latched in the sponge on each init.
         .squeeze_lane_mode(top_k_squeeze_lane_mode),
         .din(top_k_din),
         .din_valid(top_k_din_valid),
         .din_ready(top_k_din_ready),
-        .lane_din(64'd0),
-        .lane_din_valid(1'b0),
-        .lane_din_ready(),
+        .lane_din(top_k_lane_din),
+        .lane_din_valid(top_k_lane_din_valid),
+        .lane_din_ready(top_k_lane_din_ready),
         .dout(top_k_dout),
         .dout_valid(top_k_dout_valid),
         .dout_ready(top_k_dout_ready),
@@ -469,6 +481,8 @@ module ml_kem_top #
     assign enc_k_din_ready  = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? top_k_din_ready : 1'b0;
     assign enc_k_dout       = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? top_k_dout       : 8'd0;
     assign enc_k_dout_valid = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? top_k_dout_valid : 1'b0;
+    // R-new-A Phase E1: lane absorb din_ready feedback to encaps
+    assign enc_k_lane_din_ready = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? top_k_lane_din_ready : 1'b0;
 
     assign dec_k_din_ready  = (!encrypt_owns_keccak && k_owner == OP_DECAPS) ? top_k_din_ready : 1'b0;
     assign dec_k_dout       = (!encrypt_owns_keccak && k_owner == OP_DECAPS) ? top_k_dout       : 8'd0;
@@ -1031,6 +1045,11 @@ module ml_kem_top #
                 .ext_k_dout(enc_k_dout),
                 .ext_k_dout_valid(enc_k_dout_valid),
                 .ext_k_dout_ready(enc_k_dout_ready),
+                // R-new-A Phase E1: lane absorb for H(ek)
+                .ext_k_absorb_lane_mode(enc_k_absorb_lane_mode),
+                .ext_k_lane_din(enc_k_lane_din),
+                .ext_k_lane_din_valid(enc_k_lane_din_valid),
+                .ext_k_lane_din_ready(enc_k_lane_din_ready),
                 // Shared kpke_encrypt at top level.
                 .ext_enc_start    (enc_ext_enc_start),
                 .ext_enc_in_we    (enc_ext_enc_in_we),

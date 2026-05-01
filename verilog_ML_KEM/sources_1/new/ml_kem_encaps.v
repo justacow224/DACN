@@ -44,6 +44,13 @@ module ml_kem_encaps #(
     input  wire [7:0]   ext_k_dout,
     input  wire         ext_k_dout_valid,
     output wire         ext_k_dout_ready,
+    // R-new-A Phase E1: lane absorb path for H(ek) — exposes encaps's own
+    // lane absorb signals to the shared sponge in ml_kem_top. Used only when
+    // HAS_INTERNAL_KECCAK == 0.
+    output wire         ext_k_absorb_lane_mode,
+    output wire [63:0]  ext_k_lane_din,
+    output wire         ext_k_lane_din_valid,
+    input  wire         ext_k_lane_din_ready,
 
     // External kpke_encrypt interface (used only when HAS_INTERNAL_ENCRYPT == 0).
     // Forward signals: this module drives a shared kpke_encrypt instance hosted
@@ -107,6 +114,12 @@ module ml_kem_encaps #(
     wire [7:0]  k_dout;
     wire        k_dout_valid;
     reg         fsm_k_dout_ready;
+    // R-new-A Phase E1: lane absorb signals for encaps's own H absorb.
+    // absorb_lane_mode_reg latched into the sponge at S_HASH_H_INIT (set 1
+    // for SHA3-256 H); cleared at S_HASH_G_INIT (byte mode for SHA3-512 G).
+    reg         absorb_lane_mode_reg;
+    reg         lane_din_valid_reg;
+    wire        lane_din_ready_w;
 
     reg         enc_start;
     reg         enc_in_we;
@@ -142,16 +155,23 @@ module ml_kem_encaps #(
     wire [7:0]  shared_k_din        = enc_owns_keccak ? enc_k_din        : k_din;
     wire        shared_k_din_valid  = enc_owns_keccak ? enc_k_din_valid  : k_din_valid;
     wire        shared_k_dout_ready = enc_owns_keccak ? enc_k_dout_ready : fsm_k_dout_ready;
+    // R-new-A Phase E1: lane absorb only used by encaps's own H — kpke_encrypt
+    // doesn't drive lane absorb (its PRF seed is 33B byte-aligned).
+    wire        shared_k_absorb_lane_mode = enc_owns_keccak ? 1'b0 : absorb_lane_mode_reg;
+    wire [63:0] shared_k_lane_din         = enc_owns_keccak ? 64'd0 : ek_rd_lane_data;
+    wire        shared_k_lane_din_valid   = enc_owns_keccak ? 1'b0 : lane_din_valid_reg;
     wire        shared_k_din_ready;
     wire [7:0]  shared_k_dout;
     wire        shared_k_dout_valid;
+    wire        shared_k_lane_din_ready;
 
-    assign k_din_ready       = enc_owns_keccak ? 1'b0 : shared_k_din_ready;
-    assign k_dout            = shared_k_dout;
-    assign k_dout_valid      = enc_owns_keccak ? 1'b0 : shared_k_dout_valid;
-    assign enc_k_din_ready   = enc_owns_keccak ? shared_k_din_ready : 1'b0;
-    assign enc_k_dout        = enc_owns_keccak ? shared_k_dout : 8'd0;
-    assign enc_k_dout_valid  = enc_owns_keccak ? shared_k_dout_valid : 1'b0;
+    assign k_din_ready         = enc_owns_keccak ? 1'b0 : shared_k_din_ready;
+    assign k_dout              = shared_k_dout;
+    assign k_dout_valid        = enc_owns_keccak ? 1'b0 : shared_k_dout_valid;
+    assign enc_k_din_ready     = enc_owns_keccak ? shared_k_din_ready : 1'b0;
+    assign enc_k_dout          = enc_owns_keccak ? shared_k_dout : 8'd0;
+    assign enc_k_dout_valid    = enc_owns_keccak ? shared_k_dout_valid : 1'b0;
+    assign lane_din_ready_w    = enc_owns_keccak ? 1'b0 : shared_k_lane_din_ready;
 
     reg [11:0] var_k;
     integer i;
@@ -160,19 +180,33 @@ module ml_kem_encaps #(
     assign ct_addr = enc_ct_addr;
     assign ct_dout = enc_ct_dout;
 
-    xpm_ram_sdp_byte #(
-        .ADDR_WIDTH(11),
-        .DEPTH(2048),
+    // R-new-A Phase E1: ek_buf reorganized as 64-bit lane-wide BRAM with
+    // byte-write enables (PS preload writes one byte at a time, crypto reads
+    // one full lane at a time). 1184 bytes / 8 = 148 lanes (rounded up to
+    // 256 lanes BRAM depth via BYTE_ADDR_WIDTH=11). Same BRAM18/36 count as
+    // the prior byte-organized layout (Vivado packs 9472 bits identically).
+    //
+    // Byte-read API preserved: ek_rd_data is muxed out of ek_rd_lane_data
+    // using ek_rd_addr[2:0] delayed 1 cycle to match the BRAM 1-cycle latency.
+    wire [63:0] ek_rd_lane_data;
+    reg  [2:0]  ek_rd_byte_pos_d1;
+
+    xpm_ram_sdp_byte_write_lane_read #(
+        .BYTE_ADDR_WIDTH(11),
+        .DEPTH_BYTES(2048),
         .READ_LATENCY(1)
     ) u_ek_buf_ram (
-        .clk    (clk),
-        .wr_en  (in_we && !busy && !in_sel && (in_addr < 11'd1184)),
-        .wr_addr(in_addr),
-        .wr_data(in_wdata),
-        .rd_en  (ek_rd_en),
-        .rd_addr(ek_rd_addr),
-        .rd_data(ek_rd_data)
+        .clk          (clk),
+        .wr_en        (in_we && !busy && !in_sel && (in_addr < 11'd1184)),
+        .wr_addr      (in_addr),
+        .wr_data      (in_wdata),
+        .rd_en        (ek_rd_en),
+        .rd_lane_addr (ek_rd_addr[10:3]),
+        .rd_lane_data (ek_rd_lane_data)
     );
+
+    // ek_rd_byte_pos_d1 latched in main FSM always block (see reset section).
+    assign ek_rd_data = ek_rd_lane_data[ek_rd_byte_pos_d1*8 +: 8];
 
     xpm_ram_sdp_byte #(
         .ADDR_WIDTH(11),
@@ -196,14 +230,15 @@ module ml_kem_encaps #(
                 .init(shared_k_init),
                 .hash_type(shared_k_hash_type),
                 .finalize(shared_k_finalize),
-                .absorb_lane_mode(1'b0),
+                // R-new-A Phase E1: lane absorb driven by encaps's own H absorb
+                .absorb_lane_mode(shared_k_absorb_lane_mode),
                 .squeeze_lane_mode(1'b0),
                 .din(shared_k_din),
                 .din_valid(shared_k_din_valid),
                 .din_ready(shared_k_din_ready),
-                .lane_din(64'd0),
-                .lane_din_valid(1'b0),
-                .lane_din_ready(),
+                .lane_din(shared_k_lane_din),
+                .lane_din_valid(shared_k_lane_din_valid),
+                .lane_din_ready(shared_k_lane_din_ready),
                 .dout(shared_k_dout),
                 .dout_valid(shared_k_dout_valid),
                 .dout_ready(shared_k_dout_ready),
@@ -212,12 +247,16 @@ module ml_kem_encaps #(
                 .lane_dout_ready(1'b0)
             );
 
-            assign ext_k_init       = 1'b0;
-            assign ext_k_hash_type  = 2'b00;
-            assign ext_k_finalize   = 1'b0;
-            assign ext_k_din        = 8'd0;
-            assign ext_k_din_valid  = 1'b0;
-            assign ext_k_dout_ready = 1'b0;
+            assign ext_k_init             = 1'b0;
+            assign ext_k_hash_type        = 2'b00;
+            assign ext_k_finalize         = 1'b0;
+            assign ext_k_din              = 8'd0;
+            assign ext_k_din_valid        = 1'b0;
+            assign ext_k_dout_ready       = 1'b0;
+            // Phase E1: lane absorb ext outputs unused in internal-keccak mode
+            assign ext_k_absorb_lane_mode = 1'b0;
+            assign ext_k_lane_din         = 64'd0;
+            assign ext_k_lane_din_valid   = 1'b0;
         end else begin : gen_ext_keccak
             assign ext_k_init         = shared_k_init;
             assign ext_k_hash_type    = shared_k_hash_type;
@@ -228,6 +267,13 @@ module ml_kem_encaps #(
             assign shared_k_dout      = ext_k_dout;
             assign shared_k_dout_valid = ext_k_dout_valid;
             assign ext_k_dout_ready   = shared_k_dout_ready;
+            // R-new-A Phase E1: lane absorb flows out via ext_k_*lane*. Lane data
+            // is the BRAM lane read directly (combinational). Lane mode goes high
+            // during S_HASH_H_INIT (latched in sponge on init pulse).
+            assign ext_k_absorb_lane_mode  = shared_k_absorb_lane_mode;
+            assign ext_k_lane_din          = shared_k_lane_din;
+            assign ext_k_lane_din_valid    = shared_k_lane_din_valid;
+            assign shared_k_lane_din_ready = ext_k_lane_din_ready;
         end
     endgenerate
 
@@ -327,20 +373,24 @@ module ml_kem_encaps #(
             ct_rd_pending_d1 <= 1'b0;
             ss_out           <= 256'd0;
 
-            init_keccak      <= 1'b0;
-            hash_type        <= 2'b00;
-            finalize_keccak  <= 1'b0;
-            k_din            <= 8'd0;
-            k_din_valid      <= 1'b0;
-            fsm_k_dout_ready <= 1'b0;
+            init_keccak           <= 1'b0;
+            hash_type             <= 2'b00;
+            finalize_keccak       <= 1'b0;
+            k_din                 <= 8'd0;
+            k_din_valid           <= 1'b0;
+            fsm_k_dout_ready      <= 1'b0;
+            // R-new-A Phase E1
+            absorb_lane_mode_reg  <= 1'b0;
+            lane_din_valid_reg    <= 1'b0;
+            ek_rd_byte_pos_d1     <= 3'd0;
 
-            enc_start        <= 1'b0;
-            enc_in_we        <= 1'b0;
-            enc_in_sel       <= 2'd0;
-            enc_in_addr      <= 11'd0;
-            enc_in_wdata     <= 8'd0;
+            enc_start             <= 1'b0;
+            enc_in_we             <= 1'b0;
+            enc_in_sel            <= 2'd0;
+            enc_in_addr           <= 11'd0;
+            enc_in_wdata          <= 8'd0;
 
-            var_k            <= 12'd0;
+            var_k                 <= 12'd0;
 
             // Explicit reset of buffer arrays. Without this, Vivado synth
             // emits [Synth 8-7137] "set and reset with same priority" and
@@ -355,15 +405,20 @@ module ml_kem_encaps #(
                 r_buf[i_rst_buf]  <= 8'd0;
             end
         end else begin
-            done             <= 1'b0;
-            out_valid        <= 1'b0;
-            ek_rd_en         <= 1'b0;
-            ct_rd_en         <= 1'b0;
-            init_keccak      <= 1'b0;
-            finalize_keccak  <= 1'b0;
-            k_din_valid      <= 1'b0;
-            enc_start        <= 1'b0;
-            enc_in_we        <= 1'b0;
+            done                 <= 1'b0;
+            out_valid            <= 1'b0;
+            ek_rd_en             <= 1'b0;
+            ct_rd_en             <= 1'b0;
+            init_keccak          <= 1'b0;
+            finalize_keccak      <= 1'b0;
+            k_din_valid          <= 1'b0;
+            // R-new-A Phase E1: lane_din_valid defaulted low; FSM holds high in ABS state.
+            lane_din_valid_reg   <= 1'b0;
+            enc_start            <= 1'b0;
+            enc_in_we            <= 1'b0;
+
+            // R-new-A Phase E1: latch ek_rd_addr[2:0] for byte mux 1 cycle later.
+            if (ek_rd_en) ek_rd_byte_pos_d1 <= ek_rd_addr[2:0];
 
             // 2-stage pipe: stage1 (ct_rd_pending) issues BRAM read, stage2
             // (ct_rd_pending_d1) consumes ct_rd_data one cycle later when the
@@ -415,40 +470,37 @@ module ml_kem_encaps #(
                     end
                 end
 
-                // h = SHA3-256(ek)
+                // h = SHA3-256(ek) — R-new-A Phase E1: lane absorb path.
+                // 1184 bytes = 148 lanes (multiple of 8). 3 cyc/lane (REQ→ABS
+                // wait-for-BRAM→ABS handshake) gives ~445 absorb cycles + ~9
+                // perm × 24 = ~660 cyc total vs the prior ~4736 cyc byte-mode
+                // path — saves ~4000 cyc per Encaps.
                 S_HASH_H_INIT: begin
-                    init_keccak <= 1'b1;
-                    hash_type   <= 2'b10; // SHA3-256
-                    var_k       <= 12'd0;
-                    state       <= S_HASH_H_REQ;
+                    init_keccak          <= 1'b1;
+                    hash_type            <= 2'b10; // SHA3-256
+                    absorb_lane_mode_reg <= 1'b1;  // Phase E1: lane absorb
+                    var_k                <= 12'd0; // doubles as lane_idx in lane mode
+                    state                <= S_HASH_H_REQ;
                 end
 
+                // Lane request: var_k[7:0] is the lane index (0..147).
                 S_HASH_H_REQ: begin
                     ek_rd_en   <= 1'b1;
-                    ek_rd_addr <= var_k[10:0];
-                    state      <= S_HASH_H_RD_WAIT;
+                    ek_rd_addr <= {var_k[7:0], 3'd0}; // lane_idx*8 byte addr
+                    state      <= S_HASH_H_ABS;
                 end
 
-                // XPM BRAM has synchronous read: consume one cycle before using rd_data.
-                S_HASH_H_RD_WAIT: begin
-                    state <= S_HASH_H_ABS;
-                end
-
+                // Lane absorb. lane_din_valid_reg is registered (1-cycle lag
+                // from being asserted), so the handshake check requires both
+                // valid AND ready — otherwise the FIRST cycle of ABS would
+                // see valid_reg=0 (still propagating) but ready=1 (sponge
+                // already in ABSORB_LANE), and the FSM would falsely advance
+                // without an actual sponge XOR.
                 S_HASH_H_ABS: begin
-                    k_din <= ek_rd_data;
-                    k_din_valid <= 1'b1;
-                    state <= S_HASH_H_ADV;
-                end
-
-                // Handshake/advance step: hold k_din_valid high until keccak
-                // asserts ready, then deassert on the handshake cycle so the
-                // absorb fires exactly once (valid observable at T_{X+1} drops
-                // to 0 before keccak can latch the same byte a second time).
-                S_HASH_H_ADV: begin
-                    k_din_valid <= 1'b1;
-                    if (k_din_ready) begin
-                        k_din_valid <= 1'b0;
-                        if (var_k == 12'd1183) begin
+                    lane_din_valid_reg <= 1'b1;
+                    if (lane_din_valid_reg && lane_din_ready_w) begin
+                        lane_din_valid_reg <= 1'b0;
+                        if (var_k == 12'd147) begin
                             state <= S_HASH_H_FIN;
                         end else begin
                             var_k <= var_k + 12'd1;
@@ -456,6 +508,11 @@ module ml_kem_encaps #(
                         end
                     end
                 end
+
+                // Legacy byte states retained as no-ops (lane FSM only uses
+                // REQ + ABS but legacy state localparams kept for compat).
+                S_HASH_H_RD_WAIT: state <= S_HASH_H_ABS;
+                S_HASH_H_ADV:     state <= S_HASH_H_ABS;
 
                 S_HASH_H_FIN: begin
                     finalize_keccak <= 1'b1;
@@ -478,12 +535,13 @@ module ml_kem_encaps #(
 
                 // (K, r) = SHA3-512(m || h)
                 S_HASH_G_INIT: begin
-                    init_keccak <= 1'b1;
-                    hash_type   <= 2'b11; // SHA3-512
-                    var_k       <= 12'd0;
-                    k_din       <= m_buf[5'd0];
-                    k_din_valid <= 1'b1;
-                    state       <= S_HASH_G_ABS;
+                    init_keccak          <= 1'b1;
+                    hash_type            <= 2'b11; // SHA3-512
+                    absorb_lane_mode_reg <= 1'b0;  // Phase E1: byte absorb for G
+                    var_k                <= 12'd0;
+                    k_din                <= m_buf[5'd0];
+                    k_din_valid          <= 1'b1;
+                    state                <= S_HASH_G_ABS;
                 end
 
                 S_HASH_G_ABS: begin
