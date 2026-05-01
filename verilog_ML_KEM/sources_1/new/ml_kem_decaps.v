@@ -38,6 +38,13 @@ module ml_kem_decaps #(
     input  wire [7:0]   ext_k_dout,
     input  wire         ext_k_dout_valid,
     output wire         ext_k_dout_ready,
+    // R-new-A Phase E3: lane absorb path for J(z||ct) — exposes decaps's
+    // own lane absorb signals to the shared sponge in ml_kem_top. Used only
+    // when HAS_INTERNAL_KECCAK == 0.
+    output wire         ext_k_absorb_lane_mode,
+    output wire [63:0]  ext_k_lane_din,
+    output wire         ext_k_lane_din_valid,
+    input  wire         ext_k_lane_din_ready,
 
     // External kpke_encrypt interface (used only when HAS_INTERNAL_ENCRYPT==0).
     // Forward signals: drive shared kpke_encrypt instance hosted at parent.
@@ -177,6 +184,13 @@ module ml_kem_decaps #(
     wire [7:0]  k_dout;
     wire        k_dout_valid;
     reg         fsm_k_dout_ready;
+    // R-new-A Phase E3: lane absorb signals for decaps's J(z||ct).
+    // J input is mixed: first 32B from z_reg (4 lanes), next 1088B from
+    // ct_buf (136 lanes). Total 140 lanes. Lane mux selects z_packed for
+    // var_k<4, ct_rd_lane_data for var_k>=4.
+    reg         absorb_lane_mode_reg;
+    reg         lane_din_valid_reg;
+    wire        lane_din_ready_w;
 
     reg         core_start;
     reg  [1:0]  core_mode;
@@ -210,15 +224,36 @@ module ml_kem_decaps #(
                                     (state == S_ENC_WAIT)   ||
                                     (state == S_ENC_SETTLE));
 
+    // R-new-A Phase E3: pack z_reg[0..31] into a single 256-bit vector for
+    // lane indexing. Lane k = z_packed[k*64 +: 64] for k=0..3.
+    wire [255:0] z_packed;
+    genvar gz;
+    generate
+        for (gz = 0; gz < 32; gz = gz + 1) begin : gen_z_pack
+            assign z_packed[gz*8 +: 8] = z_reg[gz];
+        end
+    endgenerate
+
+    // J lane mux: first 4 lanes (var_k=0..3) from z_reg, rest from ct_buf.
+    // var_k carries the lane index in lane mode (0..139 for 140 lanes total).
+    wire [63:0] j_lane_din = (var_k < 12'd4) ? z_packed[var_k[1:0]*64 +: 64]
+                                             : ct_rd_lane_data;
+
     wire        shared_k_init       = core_owns_keccak ? core_k_init       : init_keccak;
     wire [1:0]  shared_k_hash_type  = core_owns_keccak ? core_k_hash_type  : hash_type;
     wire        shared_k_finalize   = core_owns_keccak ? core_k_finalize   : finalize_keccak;
     wire [7:0]  shared_k_din        = core_owns_keccak ? core_k_din        : k_din;
     wire        shared_k_din_valid  = core_owns_keccak ? core_k_din_valid  : k_din_valid;
     wire        shared_k_dout_ready = core_owns_keccak ? core_k_dout_ready : fsm_k_dout_ready;
+    // R-new-A Phase E3: lane absorb only used by decaps's own J — kpke_decrypt
+    // doesn't drive lane absorb. Tied to 0 when core_owns_keccak.
+    wire        shared_k_absorb_lane_mode = core_owns_keccak ? 1'b0 : absorb_lane_mode_reg;
+    wire [63:0] shared_k_lane_din         = core_owns_keccak ? 64'd0 : j_lane_din;
+    wire        shared_k_lane_din_valid   = core_owns_keccak ? 1'b0 : lane_din_valid_reg;
     wire        shared_k_din_ready;
     wire [7:0]  shared_k_dout;
     wire        shared_k_dout_valid;
+    wire        shared_k_lane_din_ready;
 
     assign k_din_ready         = core_owns_keccak ? 1'b0 : shared_k_din_ready;
     assign k_dout              = shared_k_dout;
@@ -226,6 +261,7 @@ module ml_kem_decaps #(
     assign core_k_din_ready    = core_owns_keccak ? shared_k_din_ready : 1'b0;
     assign core_k_dout         = core_owns_keccak ? shared_k_dout : 8'd0;
     assign core_k_dout_valid   = core_owns_keccak ? shared_k_dout_valid : 1'b0;
+    assign lane_din_ready_w    = core_owns_keccak ? 1'b0 : shared_k_lane_din_ready;
 
     reg [11:0] var_k;
     reg [7:0]  xor_acc;
@@ -270,19 +306,29 @@ module ml_kem_decaps #(
         .rd_data(ek_rd_data)
     );
 
-    xpm_ram_sdp_byte #(
-        .ADDR_WIDTH(11),
-        .DEPTH(2048),
+    // R-new-A Phase E3: ct_buf reorganized as 64-bit lane-wide BRAM with
+    // byte-write enables. Required for lane absorb on J(z||ct) — the ct
+    // portion is 1088 bytes = 136 lanes, fed at 1 lane/cycle into sponge.
+    // Byte-read API preserved via 1-cycle-delayed byte-mux for the
+    // compare-XOR and core-input forward paths.
+    wire [63:0] ct_rd_lane_data;
+    reg  [2:0]  ct_rd_byte_pos_d1;
+
+    xpm_ram_sdp_byte_write_lane_read #(
+        .BYTE_ADDR_WIDTH(11),
+        .DEPTH_BYTES(2048),
         .READ_LATENCY(1)
     ) u_ct_buf_ram (
-        .clk    (clk),
-        .wr_en  (in_we && !busy && in_sel && (in_addr < 12'd1088)),
-        .wr_addr(in_addr[10:0]),
-        .wr_data(in_wdata),
-        .rd_en  (ct_rd_en),
-        .rd_addr(ct_rd_addr),
-        .rd_data(ct_rd_data)
+        .clk          (clk),
+        .wr_en        (in_we && !busy && in_sel && (in_addr < 12'd1088)),
+        .wr_addr      (in_addr[10:0]),
+        .wr_data      (in_wdata),
+        .rd_en        (ct_rd_en),
+        .rd_lane_addr (ct_rd_addr[10:3]),
+        .rd_lane_data (ct_rd_lane_data)
     );
+
+    assign ct_rd_data = ct_rd_lane_data[ct_rd_byte_pos_d1*8 +: 8];
 
     xpm_ram_sdp_byte #(
         .ADDR_WIDTH(11),
@@ -306,14 +352,15 @@ module ml_kem_decaps #(
                 .init(shared_k_init),
                 .hash_type(shared_k_hash_type),
                 .finalize(shared_k_finalize),
-                .absorb_lane_mode(1'b0),
+                // R-new-A Phase E3: lane absorb driven by decaps's J hash
+                .absorb_lane_mode(shared_k_absorb_lane_mode),
                 .squeeze_lane_mode(1'b0),
                 .din(shared_k_din),
                 .din_valid(shared_k_din_valid),
                 .din_ready(shared_k_din_ready),
-                .lane_din(64'd0),
-                .lane_din_valid(1'b0),
-                .lane_din_ready(),
+                .lane_din(shared_k_lane_din),
+                .lane_din_valid(shared_k_lane_din_valid),
+                .lane_din_ready(shared_k_lane_din_ready),
                 .dout(shared_k_dout),
                 .dout_valid(shared_k_dout_valid),
                 .dout_ready(shared_k_dout_ready),
@@ -322,12 +369,16 @@ module ml_kem_decaps #(
                 .lane_dout_ready(1'b0)
             );
 
-            assign ext_k_init       = 1'b0;
-            assign ext_k_hash_type  = 2'b00;
-            assign ext_k_finalize   = 1'b0;
-            assign ext_k_din        = 8'd0;
-            assign ext_k_din_valid  = 1'b0;
-            assign ext_k_dout_ready = 1'b0;
+            assign ext_k_init             = 1'b0;
+            assign ext_k_hash_type        = 2'b00;
+            assign ext_k_finalize         = 1'b0;
+            assign ext_k_din              = 8'd0;
+            assign ext_k_din_valid        = 1'b0;
+            assign ext_k_dout_ready       = 1'b0;
+            // Phase E3: lane absorb ext outputs unused in internal-keccak mode
+            assign ext_k_absorb_lane_mode = 1'b0;
+            assign ext_k_lane_din         = 64'd0;
+            assign ext_k_lane_din_valid   = 1'b0;
         end else begin : gen_ext_keccak
             assign ext_k_init        = shared_k_init;
             assign ext_k_hash_type   = shared_k_hash_type;
@@ -338,6 +389,11 @@ module ml_kem_decaps #(
             assign shared_k_dout      = ext_k_dout;
             assign shared_k_dout_valid = ext_k_dout_valid;
             assign ext_k_dout_ready  = shared_k_dout_ready;
+            // R-new-A Phase E3: lane absorb flows out via ext_k_*lane*.
+            assign ext_k_absorb_lane_mode  = shared_k_absorb_lane_mode;
+            assign ext_k_lane_din          = shared_k_lane_din;
+            assign ext_k_lane_din_valid    = shared_k_lane_din_valid;
+            assign shared_k_lane_din_ready = ext_k_lane_din_ready;
         end
     endgenerate
 
@@ -449,14 +505,18 @@ module ml_kem_decaps #(
             k_prime_vec      <= 256'd0;
             k_reject_vec     <= 256'd0;
 
-            init_keccak      <= 1'b0;
-            hash_type        <= 2'b00;
-            finalize_keccak  <= 1'b0;
-            k_din            <= 8'd0;
-            k_din_valid      <= 1'b0;
-            fsm_k_dout_ready <= 1'b0;
+            init_keccak           <= 1'b0;
+            hash_type             <= 2'b00;
+            finalize_keccak       <= 1'b0;
+            k_din                 <= 8'd0;
+            k_din_valid           <= 1'b0;
+            fsm_k_dout_ready      <= 1'b0;
+            // R-new-A Phase E3
+            absorb_lane_mode_reg  <= 1'b0;
+            lane_din_valid_reg    <= 1'b0;
+            ct_rd_byte_pos_d1     <= 3'd0;
 
-            core_start       <= 1'b0;
+            core_start            <= 1'b0;
             core_mode        <= 2'd0;
             core_in_we       <= 1'b0;
             core_in_sel      <= 2'd0;
@@ -489,17 +549,21 @@ module ml_kem_decaps #(
                 ss_buf[i]   <= 8'd0;
             end
         end else begin
-            done             <= 1'b0;
-            out_valid        <= 1'b0;
-            init_keccak      <= 1'b0;
-            finalize_keccak  <= 1'b0;
-            k_din_valid      <= 1'b0;
-            core_start       <= 1'b0;
-            core_in_we       <= 1'b0;
-            dk_rd_en         <= 1'b0;
-            ek_rd_en         <= 1'b0;
-            ct_rd_en         <= 1'b0;
-            ct_prime_rd_en   <= 1'b0;
+            done                 <= 1'b0;
+            out_valid            <= 1'b0;
+            init_keccak          <= 1'b0;
+            finalize_keccak      <= 1'b0;
+            k_din_valid          <= 1'b0;
+            // R-new-A Phase E3
+            lane_din_valid_reg   <= 1'b0;
+            // Latch byte position 1 cycle after ct_rd_en for byte-mux read.
+            if (ct_rd_en) ct_rd_byte_pos_d1 <= ct_rd_addr[2:0];
+            core_start           <= 1'b0;
+            core_in_we           <= 1'b0;
+            dk_rd_en             <= 1'b0;
+            ek_rd_en             <= 1'b0;
+            ct_rd_en             <= 1'b0;
+            ct_prime_rd_en       <= 1'b0;
 
             if (out_rd) begin
                 out_valid <= 1'b1;
@@ -661,44 +725,44 @@ module ml_kem_decaps #(
                     end
                 end
 
-                // K_reject = SHAKE-256(z || ct)
+                // K_reject = SHAKE-256(z || ct) — R-new-A Phase E3 lane absorb.
+                // Mixed source: 32B z_reg (4 lanes packed combinational) + 1088B
+                // ct_buf (136 lanes via BRAM read). Total 140 lanes. Saves ~3700
+                // cyc per Decaps vs the prior 4-state byte FSM (~4400 cyc).
                 S_HASH_J_INIT: begin
-                    init_keccak <= 1'b1;
-                    hash_type   <= 2'b01; // SHAKE-256
-                    var_k       <= 12'd0;
-                    k_din       <= z_reg[5'd0];
-                    k_din_valid <= 1'b1;
-                    state       <= S_HASH_J_ABS;
+                    init_keccak          <= 1'b1;
+                    hash_type            <= 2'b01; // SHAKE-256
+                    absorb_lane_mode_reg <= 1'b1;  // Phase E3: lane absorb
+                    var_k                <= 12'd0; // lane index 0..139
+                    state                <= S_HASH_J_CT_WAIT;
                 end
 
+                // Lane request: kick BRAM read for ct lanes; z lanes already
+                // combinational from z_packed (via j_lane_din mux).
+                S_HASH_J_CT_WAIT: begin
+                    if (var_k >= 12'd4) begin
+                        ct_rd_en   <= 1'b1;
+                        ct_rd_addr <= {(var_k[7:0] - 8'd4), 3'd0};
+                    end
+                    state <= S_HASH_J_ABS;
+                end
+
+                // Lane absorb. Phase E1 handshake fix: gate on valid_reg too.
                 S_HASH_J_ABS: begin
-                    k_din_valid <= 1'b1;
-                    if (k_din_ready) begin
-                        if (var_k == 12'd1119) begin
-                            k_din_valid <= 1'b0;
+                    lane_din_valid_reg <= 1'b1;
+                    if (lane_din_valid_reg && lane_din_ready_w) begin
+                        lane_din_valid_reg <= 1'b0;
+                        if (var_k == 12'd139) begin
                             state <= S_HASH_J_FIN;
                         end else begin
-                            if (var_k < 12'd31) begin
-                                var_k <= var_k + 12'd1;
-                                k_din <= z_reg[var_k[4:0] + 5'd1];
-                            end else begin
-                                var_k    <= var_k + 12'd1;
-                                ct_rd_en <= 1'b1;
-                                ct_rd_addr <= var_k[10:0] - 11'd31;
-                                state    <= S_HASH_J_CT_WAIT;
-                            end
+                            var_k <= var_k + 12'd1;
+                            state <= S_HASH_J_CT_WAIT;
                         end
                     end
                 end
 
-                S_HASH_J_CT_WAIT: begin
-                    state <= S_HASH_J_CT_SEND;
-                end
-
-                S_HASH_J_CT_SEND: begin
-                    k_din       <= ct_rd_data;
-                    state <= S_HASH_J_ABS;
-                end
+                // Legacy state retained as no-op (lane FSM uses INIT/CT_WAIT/ABS).
+                S_HASH_J_CT_SEND: state <= S_HASH_J_ABS;
 
                 S_HASH_J_FIN: begin
                     finalize_keccak  <= 1'b1;

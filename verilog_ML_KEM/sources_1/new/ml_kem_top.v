@@ -303,6 +303,11 @@ module ml_kem_top #
     wire [7:0]  dec_k_dout;
     wire        dec_k_dout_valid;
     wire        dec_k_dout_ready;
+    // R-new-A Phase E3: lane absorb fanin for decaps's J(z||ct) hash
+    wire        dec_k_absorb_lane_mode;
+    wire [63:0] dec_k_lane_din;
+    wire        dec_k_lane_din_valid;
+    wire        dec_k_lane_din_ready;
 
     // Lifted shared kpke_encrypt instance (Option D area share). Drives keccak
     // directly through its own ext_k_* path, taking precedence over the
@@ -438,20 +443,21 @@ module ml_kem_top #
     // gates the kpke_encrypt-vs-others priority, so the lane mux mirrors it.
     wire        top_k_squeeze_lane_mode = encrypt_owns_keccak ? kpke_enc_k_squeeze_lane_mode : 1'b0;
     wire        top_k_lane_dout_ready   = encrypt_owns_keccak ? kpke_enc_k_lane_dout_ready   : 1'b0;
-    // R-new-A Phase E1+E2: encaps and keygen drive lane absorb for their
-    // H(ek) SHA3-256 hashes (1184B = 148 lanes). kpke_encrypt's absorb (PRF
-    // seed 33B) and decaps's hashes (G is 64B byte, J is mixed-source) stay
-    // byte mode for now. encrypt_owns_keccak preempts (kpke_encrypt absorb
-    // path is byte mode).
+    // R-new-A Phase E1+E2+E3: encaps/keygen H(ek) SHA3-256 + decaps J(z||ct)
+    // SHAKE-256 all use lane absorb. kpke_encrypt's absorb (PRF seed 33B)
+    // stays byte. encrypt_owns_keccak preempts (kpke_encrypt absorb is byte).
     wire        top_k_absorb_lane_mode = encrypt_owns_keccak     ? 1'b0 :
                                          (k_owner == OP_KEYGEN) ? kg_k_absorb_lane_mode :
-                                         (k_owner == OP_ENCAPS) ? enc_k_absorb_lane_mode : 1'b0;
+                                         (k_owner == OP_ENCAPS) ? enc_k_absorb_lane_mode :
+                                         (k_owner == OP_DECAPS) ? dec_k_absorb_lane_mode : 1'b0;
     wire [63:0] top_k_lane_din         = encrypt_owns_keccak     ? 64'd0 :
                                          (k_owner == OP_KEYGEN) ? kg_k_lane_din :
-                                         (k_owner == OP_ENCAPS) ? enc_k_lane_din : 64'd0;
+                                         (k_owner == OP_ENCAPS) ? enc_k_lane_din :
+                                         (k_owner == OP_DECAPS) ? dec_k_lane_din : 64'd0;
     wire        top_k_lane_din_valid   = encrypt_owns_keccak     ? 1'b0 :
                                          (k_owner == OP_KEYGEN) ? kg_k_lane_din_valid :
-                                         (k_owner == OP_ENCAPS) ? enc_k_lane_din_valid : 1'b0;
+                                         (k_owner == OP_ENCAPS) ? enc_k_lane_din_valid :
+                                         (k_owner == OP_DECAPS) ? dec_k_lane_din_valid : 1'b0;
     wire        top_k_din_ready;
     wire [7:0]  top_k_dout;
     wire        top_k_dout_valid;
@@ -494,9 +500,10 @@ module ml_kem_top #
     assign enc_k_din_ready  = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? top_k_din_ready : 1'b0;
     assign enc_k_dout       = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? top_k_dout       : 8'd0;
     assign enc_k_dout_valid = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? top_k_dout_valid : 1'b0;
-    // R-new-A Phase E1+E2: lane absorb din_ready feedback to encaps/keygen
+    // R-new-A Phase E1+E2+E3: lane absorb din_ready feedback to encaps/keygen/decaps
     assign enc_k_lane_din_ready = (!encrypt_owns_keccak && k_owner == OP_ENCAPS) ? top_k_lane_din_ready : 1'b0;
     assign kg_k_lane_din_ready  = (!encrypt_owns_keccak && k_owner == OP_KEYGEN) ? top_k_lane_din_ready : 1'b0;
+    assign dec_k_lane_din_ready = (!encrypt_owns_keccak && k_owner == OP_DECAPS) ? top_k_lane_din_ready : 1'b0;
 
     assign dec_k_din_ready  = (!encrypt_owns_keccak && k_owner == OP_DECAPS) ? top_k_din_ready : 1'b0;
     assign dec_k_dout       = (!encrypt_owns_keccak && k_owner == OP_DECAPS) ? top_k_dout       : 8'd0;
@@ -1110,6 +1117,11 @@ module ml_kem_top #
                 .ext_k_dout(dec_k_dout),
                 .ext_k_dout_valid(dec_k_dout_valid),
                 .ext_k_dout_ready(dec_k_dout_ready),
+                // R-new-A Phase E3: lane absorb for J(z||ct)
+                .ext_k_absorb_lane_mode(dec_k_absorb_lane_mode),
+                .ext_k_lane_din(dec_k_lane_din),
+                .ext_k_lane_din_valid(dec_k_lane_din_valid),
+                .ext_k_lane_din_ready(dec_k_lane_din_ready),
                 // Shared kpke_encrypt at top level.
                 .ext_enc_start    (dec_ext_enc_start),
                 .ext_enc_in_we    (dec_ext_enc_in_we),
