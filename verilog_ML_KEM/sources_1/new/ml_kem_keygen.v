@@ -34,6 +34,13 @@ module ml_kem_keygen #(
     input  wire [7:0]   ext_k_dout,
     input  wire         ext_k_dout_valid,
     output wire         ext_k_dout_ready,
+    // R-new-A Phase E2: lane absorb path for H(ek) — exposes keygen's own
+    // lane absorb signals to the shared sponge in ml_kem_top. Used only when
+    // HAS_INTERNAL_KECCAK == 0.
+    output wire         ext_k_absorb_lane_mode,
+    output wire [63:0]  ext_k_lane_din,
+    output wire         ext_k_lane_din_valid,
+    input  wire         ext_k_lane_din_ready,
 
     // Step R3: external shared poly-engine interface, used only when
     // HAS_INTERNAL_POLY == 0. Mirrors the kpke_encrypt/kpke_decrypt patterns
@@ -176,54 +183,35 @@ module ml_kem_keygen #(
     wire [7:0] seed_z_byte;
     assign seed_z_byte = seed_z_in[var_k[4:0] * 8 +: 8];
 
-    // PK buffer implemented as deterministic BRAM (single write + single read).
+    // R-new-A Phase E2: pk_buf reorganized as 64-bit lane-wide BRAM with
+    // byte-write enables. PS-side AXI / internal pk pack writes 1 byte per
+    // cycle (pk_we + pk_addr + pk_dout); H absorb reads 1 lane per cycle;
+    // legacy byte-read paths (S_PACK_SK_PK) reuse a 1-cycle delayed byte
+    // mux on the lane data. Same BRAM18/36 count as the prior byte-organized
+    // layout (2048 bytes × 8 = 256 lanes × 64 = 16384 bits).
     reg  [10:0] pk_buf_rd_addr;
     reg         pk_buf_rd_en;
     wire [7:0]  pk_buf_rd_data;
+    wire [63:0] pk_buf_rd_lane_data;
+    reg  [2:0]  pk_buf_rd_byte_pos_d1;
 
-    xpm_memory_sdpram #(
-        .ADDR_WIDTH_A(11),
-        .ADDR_WIDTH_B(11),
-        .AUTO_SLEEP_TIME(0),
-        .BYTE_WRITE_WIDTH_A(8),
-        .CASCADE_HEIGHT(0),
-        .CLOCKING_MODE("common_clock"),
-        .ECC_MODE("no_ecc"),
-        .MEMORY_INIT_FILE("none"),
-        .MEMORY_INIT_PARAM("0"),
-        .MEMORY_OPTIMIZATION("true"),
-        .MEMORY_PRIMITIVE("block"),
-        .MEMORY_SIZE(2048 * 8),
-        .MESSAGE_CONTROL(0),
-        .READ_DATA_WIDTH_B(8),
-        .READ_LATENCY_B(1),
-        .READ_RESET_VALUE_B("0"),
-        .RST_MODE_A("SYNC"),
-        .RST_MODE_B("SYNC"),
-        .SIM_ASSERT_CHK(0),
-        .USE_EMBEDDED_CONSTRAINT(0),
-        .USE_MEM_INIT(0),
-        .WAKEUP_TIME("disable_sleep"),
-        .WRITE_DATA_WIDTH_A(8),
-        .WRITE_MODE_B("read_first")
+    xpm_ram_sdp_byte_write_lane_read #(
+        .BYTE_ADDR_WIDTH(11),
+        .DEPTH_BYTES(2048),
+        .READ_LATENCY(1)
     ) u_pk_buf (
-        .clka(clk),
-        .clkb(clk),
-        .ena(1'b1),
-        .enb(pk_buf_rd_en),
-        .wea(pk_we),
-        .addra(pk_addr),
-        .addrb(pk_buf_rd_addr),
-        .dina(pk_dout),
-        .doutb(pk_buf_rd_data),
-        .dbiterrb(),
-        .sbiterrb(),
-        .injectdbiterra(1'b0),
-        .injectsbiterra(1'b0),
-        .regceb(1'b1),
-        .rstb(1'b0),
-        .sleep(1'b0)
+        .clk          (clk),
+        .wr_en        (pk_we),
+        .wr_addr      (pk_addr),
+        .wr_data      (pk_dout),
+        .rd_en        (pk_buf_rd_en),
+        .rd_lane_addr (pk_buf_rd_addr[10:3]),
+        .rd_lane_data (pk_buf_rd_lane_data)
     );
+
+    // Byte-mux the lane data for legacy byte-read paths. Byte position is
+    // captured 1 cycle after rd_en to align with BRAM 1-cycle latency.
+    assign pk_buf_rd_data = pk_buf_rd_lane_data[pk_buf_rd_byte_pos_d1*8 +: 8];
 
     // =================================================================
     // BRAM Array (7 x True Dual Port 256x16)
@@ -278,6 +266,12 @@ module ml_kem_keygen #(
     wire        k_dout_valid;
     reg         fsm_k_dout_ready;
     wire        parse_k_dout_ready;
+    // R-new-A Phase E2: lane absorb signals for keygen's H(ek). Latched at
+    // S_HASH_H_PK init (set 1 for SHA3-256), cleared on next sponge init
+    // (G/PRF/XOF use byte mode). Phase E1 used the same pattern in encaps.
+    reg         absorb_lane_mode_reg;
+    reg         lane_din_valid_reg;
+    wire        lane_din_ready_w;
 
     wire k_dout_ready = (state == S_XOF_WAIT) ? parse_k_dout_ready : fsm_k_dout_ready;
 
@@ -286,19 +280,23 @@ module ml_kem_keygen #(
             keccak_sponge_top u_keccak (
                 .clk(clk), .rst_n(rst_n),
                 .init(init_keccak), .hash_type(hash_type), .finalize(finalize_keccak),
-                .absorb_lane_mode(1'b0), .squeeze_lane_mode(1'b0),
+                .absorb_lane_mode(absorb_lane_mode_reg), .squeeze_lane_mode(1'b0),
                 .din(k_din), .din_valid(k_din_valid), .din_ready(k_din_ready),
-                .lane_din(64'd0), .lane_din_valid(1'b0), .lane_din_ready(),
+                .lane_din(pk_buf_rd_lane_data), .lane_din_valid(lane_din_valid_reg), .lane_din_ready(lane_din_ready_w),
                 .dout(k_dout), .dout_valid(k_dout_valid), .dout_ready(k_dout_ready),
                 .lane_dout(), .lane_dout_valid(), .lane_dout_ready(1'b0)
             );
 
-            assign ext_k_init       = 1'b0;
-            assign ext_k_hash_type  = 2'b00;
-            assign ext_k_finalize   = 1'b0;
-            assign ext_k_din        = 8'd0;
-            assign ext_k_din_valid  = 1'b0;
-            assign ext_k_dout_ready = 1'b0;
+            assign ext_k_init             = 1'b0;
+            assign ext_k_hash_type        = 2'b00;
+            assign ext_k_finalize         = 1'b0;
+            assign ext_k_din              = 8'd0;
+            assign ext_k_din_valid        = 1'b0;
+            assign ext_k_dout_ready       = 1'b0;
+            // Phase E2: lane absorb ext outputs unused in internal-keccak mode
+            assign ext_k_absorb_lane_mode = 1'b0;
+            assign ext_k_lane_din         = 64'd0;
+            assign ext_k_lane_din_valid   = 1'b0;
         end else begin : gen_ext_keccak
             assign ext_k_init       = init_keccak;
             assign ext_k_hash_type  = hash_type;
@@ -309,8 +307,18 @@ module ml_kem_keygen #(
             assign k_dout           = ext_k_dout;
             assign k_dout_valid     = ext_k_dout_valid;
             assign ext_k_dout_ready = k_dout_ready;
+            // R-new-A Phase E2: lane absorb path — flows out via ext_k_*lane*.
+            assign ext_k_absorb_lane_mode = absorb_lane_mode_reg;
+            assign ext_k_lane_din         = pk_buf_rd_lane_data;
+            assign ext_k_lane_din_valid   = lane_din_valid_reg;
+            assign lane_din_ready_w       = ext_k_lane_din_ready;
         end
     endgenerate
+
+    // For HAS_INTERNAL_KECCAK=1 path, lane_din_ready_w is driven directly by
+    // the local sponge instantiation (declared as a wire). When
+    // HAS_INTERNAL_KECCAK=0, lane_din_ready_w is assigned in gen_ext_keccak.
+    // No extra wiring needed here.
 
     // 2. Poly CBD Eta2
     reg         cbd_start;
@@ -630,6 +638,10 @@ module ml_kem_keygen #(
             hash_type   <= h_type;
             var_k       <= 0;
             state       <= target_state;
+            // R-new-A Phase E2: lane absorb only used by SHA3-256 H(ek) of
+            // pk_buf (1184B = 148 lanes). G/PRF/XOF stay byte mode because
+            // their inputs are short or non-multiple-of-8.
+            absorb_lane_mode_reg <= (h_type == 2'b10);
         end
     endtask
 
@@ -687,14 +699,18 @@ module ml_kem_keygen #(
     // i_clr_buf removed (was only used by the soft-clear for-loop, now gone).
     always @(posedge clk) begin
         if (!rst_n) begin
-            state           <= S_IDLE;
-            done            <= 0;
-            init_keccak     <= 0;
-            finalize_keccak <= 0;
-            hash_type       <= 0;
-            k_din           <= 0;
-            k_din_valid     <= 0;
-            fsm_k_dout_ready    <= 0;
+            state                 <= S_IDLE;
+            done                  <= 0;
+            init_keccak           <= 0;
+            finalize_keccak       <= 0;
+            hash_type             <= 0;
+            k_din                 <= 0;
+            k_din_valid           <= 0;
+            fsm_k_dout_ready      <= 0;
+            // R-new-A Phase E2
+            absorb_lane_mode_reg  <= 0;
+            lane_din_valid_reg    <= 0;
+            pk_buf_rd_byte_pos_d1 <= 0;
             
             cbd_start   <= 0;
             ntt_start   <= 0;
@@ -724,6 +740,10 @@ module ml_kem_keygen #(
             init_keccak     <= 0;
             finalize_keccak <= 0;
             k_din_valid     <= 0;
+            // R-new-A Phase E2
+            lane_din_valid_reg <= 0;
+            // Latch byte position 1 cycle after rd_en for byte-mux read.
+            if (pk_buf_rd_en) pk_buf_rd_byte_pos_d1 <= pk_buf_rd_addr[2:0];
             cbd_start       <= 0;
             ntt_start       <= 0;
             parse_start     <= 0;
@@ -1013,9 +1033,13 @@ module ml_kem_keygen #(
                     end
                 end
 
+                // R-new-A Phase E2: lane absorb path for H(ek) — 1184 bytes
+                // = 148 lanes, ~3 cyc/lane × 148 + ~9 perm × 24 ≈ 660 cyc
+                // total vs byte-mode ~3552 cyc, saves ~2900 cyc per KeyGen.
                 S_HASH_H_PK: begin
-                    if (var_k < 1184) begin
-                        pk_buf_rd_addr <= var_k[10:0];
+                    if (var_k < 148) begin
+                        // Lane index = var_k[7:0]; byte addr = var_k*8
+                        pk_buf_rd_addr <= {var_k[7:0], 3'd0};
                         pk_buf_rd_en <= 1;
                         state <= S_HASH_H_PK_WAIT;
                     end else begin
@@ -1026,14 +1050,20 @@ module ml_kem_keygen #(
                 end
 
                 S_HASH_H_PK_WAIT: begin
-                    // Safe path: absorb BRAM sync-read latency per byte.
+                    // BRAM 1-cycle sync-read latency. lane_din will be valid
+                    // at next posedge.
                     state <= S_HASH_H_PK_SEND;
                 end
 
                 S_HASH_H_PK_SEND: begin
-                    if (k_din_ready) begin
-                        k_din <= pk_buf_rd_data;
-                        k_din_valid <= 1;
+                    // Phase E1 handshake fix: check valid_reg && ready_w.
+                    // First cycle of SEND has valid_reg=0 (just being asserted),
+                    // ready_w may be 1 (sponge in ABSORB_LANE) — without the
+                    // valid gate, FSM would falsely advance without the actual
+                    // sponge XOR.
+                    lane_din_valid_reg <= 1'b1;
+                    if (lane_din_valid_reg && lane_din_ready_w) begin
+                        lane_din_valid_reg <= 1'b0;
                         var_k <= var_k + 1;
                         state <= S_HASH_H_PK;
                     end
