@@ -1333,7 +1333,17 @@ module kpke_encrypt #(
                     end else begin
                         init_keccak           <= 1'b1;
                         hash_type             <= 2'b01; // SHAKE256
-                        squeeze_lane_mode_reg <= 1'b1;  // R-new-A Phase D1: lane squeeze for PRF
+                        // R-new-A Phase D DEFERRED: lane squeeze for PRF caused
+                        // input-dependent ct mismatch on KR260 (vec #14 fail
+                        // 7/100 + decaps timeout). Sim repro confirmed; prf_buf
+                        // values are byte-for-byte identical to byte mode but
+                        // somehow downstream of CBD differs. Root cause unknown
+                        // — need waveform-level trace to debug. Phase D lane
+                        // squeeze infrastructure (sponge mode_lane_sq, ext_k_*lane*
+                        // ports, top mux) preserved for future re-enable. Force
+                        // squeeze byte mode here as fallback. Saving lost: ~1500
+                        // cyc / Full KEM. E1+E2+E3 lane absorb (~10k cyc) intact.
+                        squeeze_lane_mode_reg <= 1'b0;
                         var_k                 <= 12'd0;
                         k_din                 <= r_buf[5'd0];
                         k_din_valid           <= 1'b1;
