@@ -265,6 +265,7 @@ module ml_kem_decaps #(
 
     reg [11:0] var_k;
     reg [7:0]  xor_acc;
+    reg [63:0] xor_acc_64;  // R-new-B Phase G0: lane-wide compare accumulator
     reg        match_reg;
     wire [7:0] match_mask = {8{match_reg}};
 
@@ -330,19 +331,28 @@ module ml_kem_decaps #(
 
     assign ct_rd_data = ct_rd_lane_data[ct_rd_byte_pos_d1*8 +: 8];
 
-    xpm_ram_sdp_byte #(
-        .ADDR_WIDTH(11),
-        .DEPTH(2048),
+    // R-new-B Phase G0: ct_prime_buf widened to 64-bit lane read for
+    // parallel compare. Byte writes from kpke_encrypt's core_ct_dout
+    // preserved via byte-strobe in the wrapper. Byte read API kept via
+    // 1-cycle-delayed byte-pos mux for any byte-level consumer.
+    wire [63:0] ct_prime_rd_lane_data;
+    reg  [2:0]  ct_prime_rd_byte_pos_d1;
+
+    xpm_ram_sdp_byte_write_lane_read #(
+        .BYTE_ADDR_WIDTH(11),
+        .DEPTH_BYTES(2048),
         .READ_LATENCY(1)
     ) u_ct_prime_buf_ram (
-        .clk    (clk),
-        .wr_en  (core_ct_we && (core_ct_addr < 11'd1088)),
-        .wr_addr(core_ct_addr),
-        .wr_data(core_ct_dout),
-        .rd_en  (ct_prime_rd_en),
-        .rd_addr(ct_prime_rd_addr),
-        .rd_data(ct_prime_rd_data)
+        .clk          (clk),
+        .wr_en        (core_ct_we && (core_ct_addr < 11'd1088)),
+        .wr_addr      (core_ct_addr),
+        .wr_data      (core_ct_dout),
+        .rd_en        (ct_prime_rd_en),
+        .rd_lane_addr (ct_prime_rd_addr[10:3]),
+        .rd_lane_data (ct_prime_rd_lane_data)
     );
+
+    assign ct_prime_rd_data = ct_prime_rd_lane_data[ct_prime_rd_byte_pos_d1*8 +: 8];
 
     generate
         if (HAS_INTERNAL_KECCAK) begin : gen_int_keccak
@@ -515,6 +525,9 @@ module ml_kem_decaps #(
             absorb_lane_mode_reg  <= 1'b0;
             lane_din_valid_reg    <= 1'b0;
             ct_rd_byte_pos_d1     <= 3'd0;
+            // R-new-B Phase G0
+            ct_prime_rd_byte_pos_d1 <= 3'd0;
+            xor_acc_64            <= 64'd0;
 
             core_start            <= 1'b0;
             core_mode        <= 2'd0;
@@ -558,6 +571,8 @@ module ml_kem_decaps #(
             lane_din_valid_reg   <= 1'b0;
             // Latch byte position 1 cycle after ct_rd_en for byte-mux read.
             if (ct_rd_en) ct_rd_byte_pos_d1 <= ct_rd_addr[2:0];
+            // R-new-B Phase G0: same for ct_prime byte mux.
+            if (ct_prime_rd_en) ct_prime_rd_byte_pos_d1 <= ct_prime_rd_addr[2:0];
             core_start           <= 1'b0;
             core_in_we           <= 1'b0;
             dk_rd_en             <= 1'b0;
@@ -862,18 +877,23 @@ module ml_kem_decaps #(
                     end
                 end
 
-                // Constant-time compare: XOR-accumulate all 1088 bytes
+                // R-new-B Phase G0: constant-time compare via lane (64-bit)
+                // XOR-accumulate over 136 lanes (= 1088 bytes). 3 cyc/lane
+                // (REQ + WAIT + LANE) × 136 = 408 cyc, vs prior 3 cyc/byte ×
+                // 1088 = 3,264 cyc → -2,856 cyc Decaps (-2.3%). Constant-
+                // time preserved: every lane is XORed unconditionally; final
+                // match_reg = (xor_acc_64 == 0).
                 S_COMPARE_INIT: begin
-                    xor_acc <= 8'd0;
-                    var_k   <= 12'd0;
-                    state   <= S_COMPARE_REQ;
+                    xor_acc_64 <= 64'd0;
+                    var_k      <= 12'd0;     // lane index 0..135
+                    state      <= S_COMPARE_REQ;
                 end
 
                 S_COMPARE_REQ: begin
                     ct_rd_en         <= 1'b1;
-                    ct_rd_addr       <= var_k[10:0];
+                    ct_rd_addr       <= {var_k[7:0], 3'b000};
                     ct_prime_rd_en   <= 1'b1;
-                    ct_prime_rd_addr <= var_k[10:0];
+                    ct_prime_rd_addr <= {var_k[7:0], 3'b000};
                     state            <= S_COMPARE_WAIT;
                 end
 
@@ -882,15 +902,12 @@ module ml_kem_decaps #(
                 end
 
                 S_COMPARE: begin
-                    xor_acc <= compare_xor_next;
-                    if (!dbg_cmp_seen && (compare_xor_byte != 8'd0)) begin
-                        dbg_cmp_seen      <= 1'b1;
-                        dbg_cmp_idx       <= var_k[10:0];
-                        dbg_ct_byte       <= ct_rd_data;
-                        dbg_ct_prime_byte <= ct_prime_rd_data;
-                    end
-                    if (var_k == 12'd1087) begin
-                        match_reg <= (compare_xor_next == 8'd0);
+                    // BRAM data for current lane (var_k) is now valid.
+                    xor_acc_64 <= xor_acc_64 | (ct_rd_lane_data ^ ct_prime_rd_lane_data);
+                    if (var_k == 12'd135) begin
+                        match_reg <= ((xor_acc_64 |
+                                       (ct_rd_lane_data ^ ct_prime_rd_lane_data))
+                                      == 64'd0);
                         var_k <= 12'd0;
                         state <= S_OUTPUT;
                     end else begin
