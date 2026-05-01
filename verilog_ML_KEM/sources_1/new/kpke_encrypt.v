@@ -293,6 +293,10 @@ module kpke_encrypt #(
     reg [1:0] v_i;
     reg [7:0] coeff_idx;
     wire [7:0] coeff_idx_next;
+    // R-new-C Phase H1: pipelined READ_REQ/CAP collapse. Lagged-by-1 copy of
+    // coeff_idx — used as the capture/write index in pipelined READ loops
+    // where the FSM advances coeff_idx every cycle (vs old 2-cyc/coef pattern).
+    reg [7:0] coeff_idx_d1;
 
     reg [1:0] comp_u_idx;
     reg [10:0] comp_base_offset;
@@ -622,7 +626,8 @@ module kpke_encrypt #(
 
     assign ntt_start     = (state == S_NTT_START);
     assign ntt_host_we   = (state == S_NTT_LOAD_LOOP);
-    assign ntt_host_addr = ((state == S_NTT_LOAD_LOOP) || (state == S_NTT_READ_REQ)) ? coeff_idx : 8'd0;
+    assign ntt_host_addr = ((state == S_NTT_LOAD_LOOP) ||
+                            (state == S_NTT_READ_REQ) || (state == S_NTT_READ_CAP)) ? coeff_idx : 8'd0;
     assign ntt_host_din  = tmp_rdata;
 
     generate
@@ -665,10 +670,11 @@ module kpke_encrypt #(
 
     assign intt_start = (state == S_U_INTT_START) || (state == S_V_INTT_START);
     assign intt_host_we = (state == S_U_INTT_LOAD_LOOP) || (state == S_V_INTT_LOAD_LOOP);
+    // R-new-C Phase H1: include READ_CAP for addr stability.
     assign intt_host_addr = ((state == S_U_INTT_LOAD_LOOP) ||
-                             (state == S_U_INTT_READ_REQ) ||
+                             (state == S_U_INTT_READ_REQ) || (state == S_U_INTT_READ_CAP) ||
                              (state == S_V_INTT_LOAD_LOOP) ||
-                             (state == S_V_INTT_READ_REQ)) ? coeff_idx : 8'd0;
+                             (state == S_V_INTT_READ_REQ) || (state == S_V_INTT_READ_CAP)) ? coeff_idx : 8'd0;
     assign intt_host_din = acc_rdata;
 
     generate
@@ -742,10 +748,12 @@ module kpke_encrypt #(
     assign pw_host_sel = (state == S_U_PW_LOAD_B_LOOP) || (state == S_V_PW_LOAD_B_LOOP);
     assign pw_host_we = (state == S_U_PW_LOAD_A_LOOP) || (state == S_U_PW_LOAD_B_LOOP) ||
                         (state == S_V_PW_LOAD_A_LOOP) || (state == S_V_PW_LOAD_B_LOOP);
+    // R-new-C Phase H1: READ_REQ now LOOP, READ_CAP now FINAL — both drive addr
+    // for BRAM read pipeline stability across the LOOP+FINAL boundary.
     assign pw_host_addr = ((state == S_U_PW_LOAD_A_LOOP) || (state == S_U_PW_LOAD_B_LOOP) ||
-                           (state == S_U_PW_READ_REQ) ||
+                           (state == S_U_PW_READ_REQ)    || (state == S_U_PW_READ_CAP) ||
                            (state == S_V_PW_LOAD_A_LOOP) || (state == S_V_PW_LOAD_B_LOOP) ||
-                           (state == S_V_PW_READ_REQ)) ? coeff_idx : 8'd0;
+                           (state == S_V_PW_READ_REQ)    || (state == S_V_PW_READ_CAP)) ? coeff_idx : 8'd0;
     assign pw_host_din = (state == S_U_PW_LOAD_A_LOOP) ? a_hat_load_din :
                          (state == S_U_PW_LOAD_B_LOOP) ? r_hat_rdata :
                          (state == S_V_PW_LOAD_A_LOOP) ? t_hat_load_din :
@@ -806,16 +814,17 @@ module kpke_encrypt #(
                          (state == S_V_ADDE2_LOAD_A_LOOP)|| (state == S_V_ADDE2_LOAD_B_LOOP) ||
                          (state == S_V_ADDMSG_LOAD_A_LOOP)|| (state == S_V_ADDMSG_LOAD_B_LOOP);
 
+    // R-new-C Phase H1: include READ_CAP (FINAL) for addr stability across LOOP+FINAL.
     assign add_host_addr = ((state == S_U_ACC_LOAD_A_LOOP)  || (state == S_U_ACC_LOAD_B_LOOP) ||
-                            (state == S_U_ACC_READ_REQ)      ||
+                            (state == S_U_ACC_READ_REQ)      || (state == S_U_ACC_READ_CAP) ||
                             (state == S_U_ADDE1_LOAD_A_LOOP) || (state == S_U_ADDE1_LOAD_B_LOOP) ||
-                            (state == S_U_ADDE1_READ_REQ)    ||
+                            (state == S_U_ADDE1_READ_REQ)    || (state == S_U_ADDE1_READ_CAP) ||
                             (state == S_V_ACC_LOAD_A_LOOP)   || (state == S_V_ACC_LOAD_B_LOOP) ||
-                            (state == S_V_ACC_READ_REQ)      ||
+                            (state == S_V_ACC_READ_REQ)      || (state == S_V_ACC_READ_CAP) ||
                             (state == S_V_ADDE2_LOAD_A_LOOP) || (state == S_V_ADDE2_LOAD_B_LOOP) ||
-                            (state == S_V_ADDE2_READ_REQ)    ||
+                            (state == S_V_ADDE2_READ_REQ)    || (state == S_V_ADDE2_READ_CAP) ||
                             (state == S_V_ADDMSG_LOAD_A_LOOP)|| (state == S_V_ADDMSG_LOAD_B_LOOP) ||
-                            (state == S_V_ADDMSG_READ_REQ)) ? coeff_idx : 8'd0;
+                            (state == S_V_ADDMSG_READ_REQ)   || (state == S_V_ADDMSG_READ_CAP)) ? coeff_idx : 8'd0;
 
     assign add_host_din = (state == S_U_ACC_LOAD_A_LOOP)    ? acc_rdata :
                           (state == S_U_ACC_LOAD_B_LOOP)    ? tmp_rdata :
@@ -1054,11 +1063,13 @@ module kpke_encrypt #(
         end else begin
             u_rd_a0 <= u_mem0[u_rpair_addr];
             u_rd_a1 <= u_mem1[u_rpair_addr];
-            if (state == S_U_ADDE1_READ_CAP) begin
-                if (coeff_idx[0]) begin
-                    u_mem1[{u_i, coeff_idx[7:1]}] <= add_host_dout;
+            // R-new-C Phase H1: pipelined ADDE1 READ — capture lagged.
+            if (((state == S_U_ADDE1_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                 (state == S_U_ADDE1_READ_CAP)) begin
+                if (coeff_idx_d1[0]) begin
+                    u_mem1[{u_i, coeff_idx_d1[7:1]}] <= add_host_dout;
                 end else begin
-                    u_mem0[{u_i, coeff_idx[7:1]}] <= add_host_dout;
+                    u_mem0[{u_i, coeff_idx_d1[7:1]}] <= add_host_dout;
                 end
             end
         end
@@ -1071,11 +1082,13 @@ module kpke_encrypt #(
         end else begin
             v_rd_a0 <= v_mem0[v_rpair_addr];
             v_rd_a1 <= v_mem1[v_rpair_addr];
-            if (state == S_V_ADDMSG_READ_CAP) begin
-                if (coeff_idx[0]) begin
-                    v_mem1[coeff_idx[7:1]] <= add_host_dout;
+            // R-new-C Phase H1: pipelined ADDMSG READ — capture lagged.
+            if (((state == S_V_ADDMSG_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                 (state == S_V_ADDMSG_READ_CAP)) begin
+                if (coeff_idx_d1[0]) begin
+                    v_mem1[coeff_idx_d1[7:1]] <= add_host_dout;
                 end else begin
-                    v_mem0[coeff_idx[7:1]] <= add_host_dout;
+                    v_mem0[coeff_idx_d1[7:1]] <= add_host_dout;
                 end
             end
         end
@@ -1100,8 +1113,10 @@ module kpke_encrypt #(
             r_hat_rdata <= 16'd0;
         end else begin
             r_hat_rdata <= r_hat_mem[r_hat_raddr];
-            if (state == S_NTT_READ_CAP) begin
-                r_hat_mem[{noise_idx, coeff_idx}] <= ntt_host_dout;
+            // R-new-C Phase H1: pipelined LOOP captures lagged-by-1 (coeff_idx_d1).
+            if (((state == S_NTT_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                 (state == S_NTT_READ_CAP)) begin
+                r_hat_mem[{noise_idx, coeff_idx_d1}] <= ntt_host_dout;
             end
         end
     end
@@ -1112,15 +1127,24 @@ module kpke_encrypt #(
         end else begin
             acc_rdata <= acc_mem[acc_raddr];
 
-            // Option B: direct PW->ACC when j==0 or i==0
-            if ((state == S_U_PW_READ_CAP) && (u_j == 2'd0)) begin
-                acc_mem[coeff_idx] <= pw_host_dout;
-            end else if ((state == S_V_PW_READ_CAP) && (v_i == 2'd0)) begin
-                acc_mem[coeff_idx] <= pw_host_dout;
-            end else if ((state == S_U_ACC_READ_CAP) || (state == S_V_ACC_READ_CAP)) begin
-                acc_mem[coeff_idx] <= add_host_dout;
-            end else if (state == S_V_ADDE2_READ_CAP) begin
-                acc_mem[coeff_idx] <= add_host_dout;
+            // R-new-C Phase H1: pipelined READ — capture index lags by 1 cyc
+            // (coeff_idx_d1) since addr drive runs ahead each cycle.
+            // Capture window: REQ (LOOP) cycles 1..255 (coeff_idx >= 1 gates
+            // out the first cycle when no data is valid yet) + CAP (FINAL) 1 cyc.
+            if (((state == S_U_PW_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                 (state == S_U_PW_READ_CAP)) begin
+                if (u_j == 2'd0) acc_mem[coeff_idx_d1] <= pw_host_dout;
+            end else if (((state == S_V_PW_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                          (state == S_V_PW_READ_CAP)) begin
+                if (v_i == 2'd0) acc_mem[coeff_idx_d1] <= pw_host_dout;
+            end else if (((state == S_U_ACC_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                          (state == S_U_ACC_READ_CAP) ||
+                          ((state == S_V_ACC_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                          (state == S_V_ACC_READ_CAP)) begin
+                acc_mem[coeff_idx_d1] <= add_host_dout;
+            end else if (((state == S_V_ADDE2_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                          (state == S_V_ADDE2_READ_CAP)) begin
+                acc_mem[coeff_idx_d1] <= add_host_dout;
             end
         end
     end
@@ -1137,11 +1161,19 @@ module kpke_encrypt #(
     // identical timing.
 
     wire        tmp_we_dual = cbd_ram_we && (noise_stage == 2'd0);
-    wire        tmp_we_pw   = ((state == S_U_PW_READ_CAP) && (u_j != 2'd0)) ||
-                              ((state == S_V_PW_READ_CAP) && (v_i != 2'd0));
-    wire        tmp_we_intt = (state == S_U_INTT_READ_CAP) || (state == S_V_INTT_READ_CAP);
+    // R-new-C Phase H1: all PW + INTT READ pipelined — capture index lags by 1 cyc.
+    wire        tmp_we_pw   = ((((state == S_U_PW_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                                 (state == S_U_PW_READ_CAP)) && (u_j != 2'd0)) ||
+                              ((((state == S_V_PW_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                                 (state == S_V_PW_READ_CAP)) && (v_i != 2'd0));
+    wire        tmp_we_intt = ((state == S_U_INTT_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                              (state == S_U_INTT_READ_CAP) ||
+                              ((state == S_V_INTT_READ_REQ) && (coeff_idx >= 8'd1)) ||
+                              (state == S_V_INTT_READ_CAP);
 
-    wire [6:0]  tmp_waddr_single = coeff_idx[7:1];
+    // All pipelined READ paths use coeff_idx_d1.
+    wire [7:0]  tmp_capture_idx  = coeff_idx_d1;
+    wire [6:0]  tmp_waddr_single = tmp_capture_idx[7:1];
     wire [15:0] tmp_wdata_single = tmp_we_intt ? intt_host_dout : pw_host_dout;
     wire        tmp_we_single    = tmp_we_pw || tmp_we_intt;
 
@@ -1156,7 +1188,7 @@ module kpke_encrypt #(
             tmp_rd0 <= tmp_mem0[tmp_raddr[7:1]];
             if (tmp_we_dual) begin
                 tmp_mem0[cbd_ram_addr] <= cbd_ram_a0_din;
-            end else if (tmp_we_single && !coeff_idx[0]) begin
+            end else if (tmp_we_single && !tmp_capture_idx[0]) begin
                 tmp_mem0[tmp_waddr_single] <= tmp_wdata_single;
             end
         end
@@ -1170,7 +1202,7 @@ module kpke_encrypt #(
             tmp_rd1 <= tmp_mem1[tmp_raddr[7:1]];
             if (tmp_we_dual) begin
                 tmp_mem1[cbd_ram_addr] <= cbd_ram_a1_din;
-            end else if (tmp_we_single && coeff_idx[0]) begin
+            end else if (tmp_we_single && tmp_capture_idx[0]) begin
                 tmp_mem1[tmp_waddr_single] <= tmp_wdata_single;
             end
         end
@@ -1234,6 +1266,7 @@ module kpke_encrypt #(
             u_j              <= 2'd0;
             v_i              <= 2'd0;
             coeff_idx        <= 8'd0;
+            coeff_idx_d1     <= 8'd0;
 
             comp_u_idx       <= 2'd0;
             comp_base_offset <= 11'd0;
@@ -1247,6 +1280,10 @@ module kpke_encrypt #(
             // mixed reset+set priorities; by removing the reset entirely the
             // ambiguity is gone and Vivado infers a true BRAM.
         end else begin
+            // R-new-C Phase H1: lagged-by-1 copy of coeff_idx for pipelined
+            // READ loops (capture index trails the address-drive index).
+            coeff_idx_d1     <= coeff_idx;
+
             done             <= 1'b0;
             out_valid        <= 1'b0;
             ct_rd_en         <= 1'b0;
@@ -1465,19 +1502,19 @@ module kpke_encrypt #(
                     end
                 end
 
+                // R-new-C Phase H1: pipelined LOOP+FINAL.
                 S_NTT_READ_REQ: begin
-                    state <= S_NTT_READ_CAP;
+                    if (coeff_idx == 8'd255) begin
+                        state <= S_NTT_READ_CAP;
+                    end else begin
+                        coeff_idx <= coeff_idx + 8'd1;
+                    end
                 end
 
                 S_NTT_READ_CAP: begin
-                    if (coeff_idx == 8'd255) begin
-                        coeff_idx <= 8'd0;
-                        noise_idx <= noise_idx + 2'd1;
-                        state     <= S_NOISE_INIT;
-                    end else begin
-                        coeff_idx <= coeff_idx + 8'd1;
-                        state     <= S_NTT_READ_REQ;
-                    end
+                    coeff_idx <= 8'd0;
+                    noise_idx <= noise_idx + 2'd1;
+                    state     <= S_NOISE_INIT;
                 end
 
                 // -------------------------------------------------
@@ -1593,22 +1630,25 @@ module kpke_encrypt #(
                     end
                 end
 
+                // R-new-C Phase H1: pipelined LOOP + FINAL replaces 2-cyc/coef
+                // REQ→CAP. coeff_idx advances every cycle while addr=coeff_idx
+                // (combinational); pw_host_dout for cycle T-1 captured at
+                // coeff_idx_d1 = T-1's value. Saves 255 cyc per loop.
                 S_U_PW_READ_REQ: begin
-                    state <= S_U_PW_READ_CAP;
+                    if (coeff_idx == 8'd255) begin
+                        state <= S_U_PW_READ_CAP;
+                    end else begin
+                        coeff_idx <= coeff_idx + 8'd1;
+                    end
                 end
 
                 S_U_PW_READ_CAP: begin
-                    if (coeff_idx == 8'd255) begin
-                        coeff_idx <= 8'd0;
-                        if (u_j == 2'd0) begin
-                            u_j <= 2'd1;
-                            state <= S_U_XOF_INIT;
-                        end else begin
-                            state <= S_U_ACC_LOAD_A_PREF;
-                        end
+                    coeff_idx <= 8'd0;
+                    if (u_j == 2'd0) begin
+                        u_j <= 2'd1;
+                        state <= S_U_XOF_INIT;
                     end else begin
-                        coeff_idx <= coeff_idx + 8'd1;
-                        state <= S_U_PW_READ_REQ;
+                        state <= S_U_ACC_LOAD_A_PREF;
                     end
                 end
 
@@ -1651,22 +1691,22 @@ module kpke_encrypt #(
                     end
                 end
 
+                // R-new-C Phase H1: pipelined LOOP+FINAL.
                 S_U_ACC_READ_REQ: begin
-                    state <= S_U_ACC_READ_CAP;
+                    if (coeff_idx == 8'd255) begin
+                        state <= S_U_ACC_READ_CAP;
+                    end else begin
+                        coeff_idx <= coeff_idx + 8'd1;
+                    end
                 end
 
                 S_U_ACC_READ_CAP: begin
-                    if (coeff_idx == 8'd255) begin
-                        coeff_idx <= 8'd0;
-                        if (u_j == 2'd2) begin
-                            state <= S_U_INTT_LOAD_PREF;
-                        end else begin
-                            u_j <= u_j + 2'd1;
-                            state <= S_U_XOF_INIT;
-                        end
+                    coeff_idx <= 8'd0;
+                    if (u_j == 2'd2) begin
+                        state <= S_U_INTT_LOAD_PREF;
                     end else begin
-                        coeff_idx <= coeff_idx + 8'd1;
-                        state <= S_U_ACC_READ_REQ;
+                        u_j <= u_j + 2'd1;
+                        state <= S_U_XOF_INIT;
                     end
                 end
 
@@ -1695,18 +1735,18 @@ module kpke_encrypt #(
                     end
                 end
 
+                // R-new-C Phase H1: pipelined LOOP+FINAL.
                 S_U_INTT_READ_REQ: begin
-                    state <= S_U_INTT_READ_CAP;
+                    if (coeff_idx == 8'd255) begin
+                        state <= S_U_INTT_READ_CAP;
+                    end else begin
+                        coeff_idx <= coeff_idx + 8'd1;
+                    end
                 end
 
                 S_U_INTT_READ_CAP: begin
-                    if (coeff_idx == 8'd255) begin
-                        coeff_idx <= 8'd0;
-                        state <= S_U_ADDE1_LOAD_A_PREF;
-                    end else begin
-                        coeff_idx <= coeff_idx + 8'd1;
-                        state <= S_U_INTT_READ_REQ;
-                    end
+                    coeff_idx <= 8'd0;
+                    state <= S_U_ADDE1_LOAD_A_PREF;
                 end
 
                 S_U_ADDE1_LOAD_A_PREF: begin
@@ -1748,23 +1788,23 @@ module kpke_encrypt #(
                     end
                 end
 
+                // R-new-C Phase H1: pipelined LOOP+FINAL.
                 S_U_ADDE1_READ_REQ: begin
-                    state <= S_U_ADDE1_READ_CAP;
+                    if (coeff_idx == 8'd255) begin
+                        state <= S_U_ADDE1_READ_CAP;
+                    end else begin
+                        coeff_idx <= coeff_idx + 8'd1;
+                    end
                 end
 
                 S_U_ADDE1_READ_CAP: begin
-                    if (coeff_idx == 8'd255) begin
-                        coeff_idx <= 8'd0;
-                        if (u_i == 2'd2) begin
-                            v_i <= 2'd0;
-                            state <= S_V_INIT;
-                        end else begin
-                            u_i <= u_i + 2'd1;
-                            state <= S_U_INIT;
-                        end
+                    coeff_idx <= 8'd0;
+                    if (u_i == 2'd2) begin
+                        v_i <= 2'd0;
+                        state <= S_V_INIT;
                     end else begin
-                        coeff_idx <= coeff_idx + 8'd1;
-                        state <= S_U_ADDE1_READ_REQ;
+                        u_i <= u_i + 2'd1;
+                        state <= S_U_INIT;
                     end
                 end
 
@@ -1815,22 +1855,22 @@ module kpke_encrypt #(
                     end
                 end
 
+                // R-new-C Phase H1: pipelined LOOP+FINAL.
                 S_V_PW_READ_REQ: begin
-                    state <= S_V_PW_READ_CAP;
+                    if (coeff_idx == 8'd255) begin
+                        state <= S_V_PW_READ_CAP;
+                    end else begin
+                        coeff_idx <= coeff_idx + 8'd1;
+                    end
                 end
 
                 S_V_PW_READ_CAP: begin
-                    if (coeff_idx == 8'd255) begin
-                        coeff_idx <= 8'd0;
-                        if (v_i == 2'd0) begin
-                            v_i <= 2'd1;
-                            state <= S_V_PW_LOAD_A_PREF;
-                        end else begin
-                            state <= S_V_ACC_LOAD_A_PREF;
-                        end
+                    coeff_idx <= 8'd0;
+                    if (v_i == 2'd0) begin
+                        v_i <= 2'd1;
+                        state <= S_V_PW_LOAD_A_PREF;
                     end else begin
-                        coeff_idx <= coeff_idx + 8'd1;
-                        state <= S_V_PW_READ_REQ;
+                        state <= S_V_ACC_LOAD_A_PREF;
                     end
                 end
 
@@ -1873,22 +1913,22 @@ module kpke_encrypt #(
                     end
                 end
 
+                // R-new-C Phase H1: pipelined LOOP+FINAL.
                 S_V_ACC_READ_REQ: begin
-                    state <= S_V_ACC_READ_CAP;
+                    if (coeff_idx == 8'd255) begin
+                        state <= S_V_ACC_READ_CAP;
+                    end else begin
+                        coeff_idx <= coeff_idx + 8'd1;
+                    end
                 end
 
                 S_V_ACC_READ_CAP: begin
-                    if (coeff_idx == 8'd255) begin
-                        coeff_idx <= 8'd0;
-                        if (v_i == 2'd2) begin
-                            state <= S_V_INTT_LOAD_PREF;
-                        end else begin
-                            v_i <= v_i + 2'd1;
-                            state <= S_V_PW_LOAD_A_PREF;
-                        end
+                    coeff_idx <= 8'd0;
+                    if (v_i == 2'd2) begin
+                        state <= S_V_INTT_LOAD_PREF;
                     end else begin
-                        coeff_idx <= coeff_idx + 8'd1;
-                        state <= S_V_ACC_READ_REQ;
+                        v_i <= v_i + 2'd1;
+                        state <= S_V_PW_LOAD_A_PREF;
                     end
                 end
 
@@ -1917,18 +1957,18 @@ module kpke_encrypt #(
                     end
                 end
 
+                // R-new-C Phase H1: pipelined LOOP+FINAL.
                 S_V_INTT_READ_REQ: begin
-                    state <= S_V_INTT_READ_CAP;
+                    if (coeff_idx == 8'd255) begin
+                        state <= S_V_INTT_READ_CAP;
+                    end else begin
+                        coeff_idx <= coeff_idx + 8'd1;
+                    end
                 end
 
                 S_V_INTT_READ_CAP: begin
-                    if (coeff_idx == 8'd255) begin
-                        coeff_idx <= 8'd0;
-                        state <= S_V_ADDE2_LOAD_A_PREF;
-                    end else begin
-                        coeff_idx <= coeff_idx + 8'd1;
-                        state <= S_V_INTT_READ_REQ;
-                    end
+                    coeff_idx <= 8'd0;
+                    state <= S_V_ADDE2_LOAD_A_PREF;
                 end
 
                 S_V_ADDE2_LOAD_A_PREF: begin
@@ -1970,18 +2010,18 @@ module kpke_encrypt #(
                     end
                 end
 
+                // R-new-C Phase H1: pipelined LOOP+FINAL.
                 S_V_ADDE2_READ_REQ: begin
-                    state <= S_V_ADDE2_READ_CAP;
+                    if (coeff_idx == 8'd255) begin
+                        state <= S_V_ADDE2_READ_CAP;
+                    end else begin
+                        coeff_idx <= coeff_idx + 8'd1;
+                    end
                 end
 
                 S_V_ADDE2_READ_CAP: begin
-                    if (coeff_idx == 8'd255) begin
-                        coeff_idx <= 8'd0;
-                        state <= S_V_ADDMSG_LOAD_A_PREF;
-                    end else begin
-                        coeff_idx <= coeff_idx + 8'd1;
-                        state <= S_V_ADDE2_READ_REQ;
-                    end
+                    coeff_idx <= 8'd0;
+                    state <= S_V_ADDMSG_LOAD_A_PREF;
                 end
 
                 S_V_ADDMSG_LOAD_A_PREF: begin
@@ -2023,21 +2063,21 @@ module kpke_encrypt #(
                     end
                 end
 
+                // R-new-C Phase H1: pipelined LOOP+FINAL.
                 S_V_ADDMSG_READ_REQ: begin
-                    state <= S_V_ADDMSG_READ_CAP;
+                    if (coeff_idx == 8'd255) begin
+                        state <= S_V_ADDMSG_READ_CAP;
+                    end else begin
+                        coeff_idx <= coeff_idx + 8'd1;
+                    end
                 end
 
                 S_V_ADDMSG_READ_CAP: begin
-                    if (coeff_idx == 8'd255) begin
-                        comp_u_idx       <= 2'd0;
-                        comp_base_offset <= 11'd0;
-                        comp_d_sel_reg   <= 2'b10; // d=10
-                        comp_mode_v      <= 1'b0;
-                        state            <= S_COMP_U_PREF;
-                    end else begin
-                        coeff_idx <= coeff_idx + 8'd1;
-                        state <= S_V_ADDMSG_READ_REQ;
-                    end
+                    comp_u_idx       <= 2'd0;
+                    comp_base_offset <= 11'd0;
+                    comp_d_sel_reg   <= 2'b10; // d=10
+                    comp_mode_v      <= 1'b0;
+                    state            <= S_COMP_U_PREF;
                 end
 
                 // -------------------------------------------------
