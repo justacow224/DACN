@@ -41,6 +41,12 @@ module ml_kem_keygen #(
     output wire [63:0]  ext_k_lane_din,
     output wire         ext_k_lane_din_valid,
     input  wire         ext_k_lane_din_ready,
+    // R-new-B Phase G1+G2: lane squeeze path for matrix-A SHAKE-128 XOF.
+    // Used by poly_parse_inline_lane_top to consume 8 byte/cyc lanes.
+    output wire         ext_k_squeeze_lane_mode,
+    input  wire [63:0]  ext_k_lane_dout,
+    input  wire         ext_k_lane_dout_valid,
+    output wire         ext_k_lane_dout_ready,
 
     // Step R3: external shared poly-engine interface, used only when
     // HAS_INTERNAL_POLY == 0. Mirrors the kpke_encrypt/kpke_decrypt patterns
@@ -265,38 +271,50 @@ module ml_kem_keygen #(
     wire [7:0]  k_dout;
     wire        k_dout_valid;
     reg         fsm_k_dout_ready;
-    wire        parse_k_dout_ready;
     // R-new-A Phase E2: lane absorb signals for keygen's H(ek). Latched at
     // S_HASH_H_PK init (set 1 for SHA3-256), cleared on next sponge init
     // (G/PRF/XOF use byte mode). Phase E1 used the same pattern in encaps.
     reg         absorb_lane_mode_reg;
     reg         lane_din_valid_reg;
     wire        lane_din_ready_w;
+    // R-new-B Phase G1+G2: lane squeeze signals for matrix-A XOF. Latched
+    // at SHAKE-128 launch (set 1 for hash_type==2'b00 in launch_keccak).
+    reg         squeeze_lane_mode_reg;
+    wire [63:0] k_lane_dout;
+    wire        k_lane_dout_valid;
+    wire        parse_k_lane_dout_ready;
+    // Lane squeeze ready: parse drives during S_XOF_WAIT; else tied 0
+    // (keygen has no FSM-driven lane consumption).
+    wire        k_lane_dout_ready = (state == S_XOF_WAIT) ? parse_k_lane_dout_ready : 1'b0;
 
-    wire k_dout_ready = (state == S_XOF_WAIT) ? parse_k_dout_ready : fsm_k_dout_ready;
+    // Byte k_dout_ready: only PRF + G hash use it. Parse moved to lane path.
+    wire k_dout_ready = fsm_k_dout_ready;
 
     generate
         if (HAS_INTERNAL_KECCAK) begin : gen_int_keccak
             keccak_sponge_top u_keccak (
                 .clk(clk), .rst_n(rst_n),
                 .init(init_keccak), .hash_type(hash_type), .finalize(finalize_keccak),
-                .absorb_lane_mode(absorb_lane_mode_reg), .squeeze_lane_mode(1'b0),
+                .absorb_lane_mode(absorb_lane_mode_reg), .squeeze_lane_mode(squeeze_lane_mode_reg),
                 .din(k_din), .din_valid(k_din_valid), .din_ready(k_din_ready),
                 .lane_din(pk_buf_rd_lane_data), .lane_din_valid(lane_din_valid_reg), .lane_din_ready(lane_din_ready_w),
                 .dout(k_dout), .dout_valid(k_dout_valid), .dout_ready(k_dout_ready),
-                .lane_dout(), .lane_dout_valid(), .lane_dout_ready(1'b0)
+                .lane_dout(k_lane_dout), .lane_dout_valid(k_lane_dout_valid), .lane_dout_ready(k_lane_dout_ready)
             );
 
-            assign ext_k_init             = 1'b0;
-            assign ext_k_hash_type        = 2'b00;
-            assign ext_k_finalize         = 1'b0;
-            assign ext_k_din              = 8'd0;
-            assign ext_k_din_valid        = 1'b0;
-            assign ext_k_dout_ready       = 1'b0;
+            assign ext_k_init               = 1'b0;
+            assign ext_k_hash_type          = 2'b00;
+            assign ext_k_finalize           = 1'b0;
+            assign ext_k_din                = 8'd0;
+            assign ext_k_din_valid          = 1'b0;
+            assign ext_k_dout_ready         = 1'b0;
             // Phase E2: lane absorb ext outputs unused in internal-keccak mode
-            assign ext_k_absorb_lane_mode = 1'b0;
-            assign ext_k_lane_din         = 64'd0;
-            assign ext_k_lane_din_valid   = 1'b0;
+            assign ext_k_absorb_lane_mode   = 1'b0;
+            assign ext_k_lane_din           = 64'd0;
+            assign ext_k_lane_din_valid     = 1'b0;
+            // R-new-B G2: lane squeeze ext outputs unused in internal-keccak mode
+            assign ext_k_squeeze_lane_mode  = 1'b0;
+            assign ext_k_lane_dout_ready    = 1'b0;
         end else begin : gen_ext_keccak
             assign ext_k_init       = init_keccak;
             assign ext_k_hash_type  = hash_type;
@@ -312,6 +330,13 @@ module ml_kem_keygen #(
             assign ext_k_lane_din         = pk_buf_rd_lane_data;
             assign ext_k_lane_din_valid   = lane_din_valid_reg;
             assign lane_din_ready_w       = ext_k_lane_din_ready;
+            // R-new-B G1+G2: lane squeeze path — squeeze_lane_mode_reg out,
+            // ext_k_lane_dout/valid in (from ml_kem_top sponge), parse-driven
+            // ready back out.
+            assign ext_k_squeeze_lane_mode = squeeze_lane_mode_reg;
+            assign k_lane_dout             = ext_k_lane_dout;
+            assign k_lane_dout_valid       = ext_k_lane_dout_valid;
+            assign ext_k_lane_dout_ready   = k_lane_dout_ready;
         end
     endgenerate
 
@@ -390,13 +415,12 @@ module ml_kem_keygen #(
     wire [15:0] parse_ram_a0_din;
     wire [15:0] parse_ram_a1_din;
 
-//    wire        parse_k_dout_ready;
-
-    poly_parse_inline_top u_parse (
+    // R-new-B Phase G2: lane-mode parse for matrix-A SHAKE-128 XOF.
+    poly_parse_inline_lane_top u_parse (
         .clk(clk), .rst_n(rst_n), .start(parse_start), .done(parse_done),
-        .shake_dout(k_dout), .shake_dout_valid(k_dout_valid), .shake_dout_ready(parse_k_dout_ready),
+        .lane_din(k_lane_dout), .lane_din_valid(k_lane_dout_valid), .lane_din_ready(parse_k_lane_dout_ready),
         .ram_we_a0(parse_ram_we_a0), .ram_we_a1(parse_ram_we_a1),
-        .ram_addr(parse_ram_addr), 
+        .ram_addr(parse_ram_addr),
         .ram_a0_din(parse_ram_a0_din), .ram_a1_din(parse_ram_a1_din)
     );
 
@@ -641,7 +665,11 @@ module ml_kem_keygen #(
             // R-new-A Phase E2: lane absorb only used by SHA3-256 H(ek) of
             // pk_buf (1184B = 148 lanes). G/PRF/XOF stay byte mode because
             // their inputs are short or non-multiple-of-8.
-            absorb_lane_mode_reg <= (h_type == 2'b10);
+            absorb_lane_mode_reg  <= (h_type == 2'b10);
+            // R-new-B Phase G1: lane squeeze only used by SHAKE-128 matrix-A
+            // XOF (parse consumes 8 byte/cyc lanes). G/PRF/H stay byte
+            // squeeze.
+            squeeze_lane_mode_reg <= (h_type == 2'b00);
         end
     endtask
 
@@ -707,8 +735,9 @@ module ml_kem_keygen #(
             k_din                 <= 0;
             k_din_valid           <= 0;
             fsm_k_dout_ready      <= 0;
-            // R-new-A Phase E2
+            // R-new-A Phase E2 / R-new-B Phase G1
             absorb_lane_mode_reg  <= 0;
+            squeeze_lane_mode_reg <= 0;
             lane_din_valid_reg    <= 0;
             pk_buf_rd_byte_pos_d1 <= 0;
             

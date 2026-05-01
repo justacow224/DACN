@@ -278,6 +278,11 @@ module ml_kem_top #
     wire [63:0] kg_k_lane_din;
     wire        kg_k_lane_din_valid;
     wire        kg_k_lane_din_ready;
+    // R-new-B Phase G1+G2: lane squeeze fanin/fanout for keygen's matrix-A XOF
+    wire        kg_k_squeeze_lane_mode;
+    wire [63:0] kg_k_lane_dout;
+    wire        kg_k_lane_dout_valid;
+    wire        kg_k_lane_dout_ready;
 
     wire        enc_k_init;
     wire [1:0]  enc_k_hash_type;
@@ -437,12 +442,14 @@ module ml_kem_top #
                                    (k_owner == OP_KEYGEN) ? kg_k_dout_ready :
                                    (k_owner == OP_ENCAPS) ? enc_k_dout_ready :
                                    (k_owner == OP_DECAPS) ? dec_k_dout_ready : 1'b0;
-    // R-new-A Phase D2: only kpke_encrypt drives lane squeeze (PRF SHAKE-256).
-    // keygen/encaps/decaps top-level FSMs use byte mode for their own G/H/J
-    // hashes — lane mode stays low for them. encrypt_owns_keccak already
-    // gates the kpke_encrypt-vs-others priority, so the lane mux mirrors it.
-    wire        top_k_squeeze_lane_mode = encrypt_owns_keccak ? kpke_enc_k_squeeze_lane_mode : 1'b0;
-    wire        top_k_lane_dout_ready   = encrypt_owns_keccak ? kpke_enc_k_lane_dout_ready   : 1'b0;
+    // R-new-A Phase D2 + R-new-B Phase G1+G2: lane squeeze fans in from
+    // kpke_encrypt (PRF SHAKE-256 + matrix-A XOF) AND keygen (matrix-A XOF).
+    // encrypt_owns_keccak gates kpke_encrypt-vs-others. When kpke_encrypt
+    // is idle, keygen owns the sponge during its XOF phase.
+    wire        top_k_squeeze_lane_mode = encrypt_owns_keccak     ? kpke_enc_k_squeeze_lane_mode :
+                                          (k_owner == OP_KEYGEN) ? kg_k_squeeze_lane_mode : 1'b0;
+    wire        top_k_lane_dout_ready   = encrypt_owns_keccak     ? kpke_enc_k_lane_dout_ready :
+                                          (k_owner == OP_KEYGEN) ? kg_k_lane_dout_ready : 1'b0;
     // R-new-A Phase E1+E2+E3: encaps/keygen H(ek) SHA3-256 + decaps J(z||ct)
     // SHAKE-256 all use lane absorb. kpke_encrypt's absorb (PRF seed 33B)
     // stays byte. encrypt_owns_keccak preempts (kpke_encrypt absorb is byte).
@@ -515,6 +522,9 @@ module ml_kem_top #
     // R-new-A Phase D2: lane squeeze fanout — only valid while kpke_encrypt owns sponge
     assign kpke_enc_k_lane_dout       = encrypt_owns_keccak ? top_k_lane_dout       : 64'd0;
     assign kpke_enc_k_lane_dout_valid = encrypt_owns_keccak ? top_k_lane_dout_valid : 1'b0;
+    // R-new-B G1+G2: lane squeeze fanout to keygen when keygen owns sponge.
+    assign kg_k_lane_dout             = (!encrypt_owns_keccak && k_owner == OP_KEYGEN) ? top_k_lane_dout       : 64'd0;
+    assign kg_k_lane_dout_valid       = (!encrypt_owns_keccak && k_owner == OP_KEYGEN) ? top_k_lane_dout_valid : 1'b0;
 
     // Shared kpke_encrypt I/O MUX: encaps owner during ENCAPS op, decaps owner
     // during DECAPS op. Mutually exclusive at op-level — no contention.
@@ -1016,6 +1026,11 @@ module ml_kem_top #
                 .ext_k_lane_din(kg_k_lane_din),
                 .ext_k_lane_din_valid(kg_k_lane_din_valid),
                 .ext_k_lane_din_ready(kg_k_lane_din_ready),
+                // R-new-B Phase G1+G2: lane squeeze for matrix-A XOF
+                .ext_k_squeeze_lane_mode(kg_k_squeeze_lane_mode),
+                .ext_k_lane_dout(kg_k_lane_dout),
+                .ext_k_lane_dout_valid(kg_k_lane_dout_valid),
+                .ext_k_lane_dout_ready(kg_k_lane_dout_ready),
                 // Step R3: shared poly engine ports
                 .ext_ntt_start    (kg_poly_ntt_start),
                 .ext_ntt_done     (kg_poly_ntt_done),

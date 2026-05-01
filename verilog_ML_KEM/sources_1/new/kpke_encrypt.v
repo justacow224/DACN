@@ -470,7 +470,8 @@ module kpke_encrypt #(
     wire [7:0]  k_dout;
     wire        k_dout_valid;
     reg         fsm_k_dout_ready;
-    wire        parse_k_dout_ready;
+    // (Legacy parse_k_dout_ready wire removed — Phase G2 lane parse uses
+    // parse_k_lane_dout_ready below.)
     // R-new-A Phase D1: lane squeeze for PRF (only used when HAS_INTERNAL_KECCAK=1).
     // squeeze_lane_mode_reg is latched into the sponge on each init pulse:
     //   - Before PRF init  (S_NOISE_INIT) → set to 1, sponge enters lane squeeze
@@ -482,9 +483,21 @@ module kpke_encrypt #(
     reg         squeeze_lane_mode_reg;
     wire [63:0] k_lane_dout;
     wire        k_lane_dout_valid;
-    reg         k_lane_dout_ready;
+    // R-new-B Phase G2: parse module now consumes lane_dout instead of byte
+    // dout for matrix-A XOF. fsm_k_lane_dout_ready is the FSM-driven value
+    // for PRF lane squeeze (D2 path); parse_k_lane_dout_ready is asserted
+    // by the new lane parse module during S_U_PARSE_*. Mux selects which
+    // signal goes to the sponge.
+    reg         fsm_k_lane_dout_ready;
+    wire        parse_k_lane_dout_ready;
+    wire        k_lane_dout_ready = ((state == S_U_PARSE_START) ||
+                                     (state == S_U_PARSE_WAIT))
+                                    ? parse_k_lane_dout_ready
+                                    : fsm_k_lane_dout_ready;
 
-    wire k_dout_ready = (state == S_U_PARSE_WAIT) ? parse_k_dout_ready : fsm_k_dout_ready;
+    // Byte k_dout_ready: only legacy byte-PRF + non-XOF paths use this.
+    // S_U_PARSE_* now uses lane path, so byte ready stays FSM-driven only.
+    wire k_dout_ready = fsm_k_dout_ready;
 
     generate
         if (HAS_INTERNAL_KECCAK) begin : gen_int_keccak
@@ -697,14 +710,16 @@ module kpke_encrypt #(
     wire [15:0] parse_ram_a0_din;
     wire [15:0] parse_ram_a1_din;
 
-    poly_parse_inline_top u_parse (
+    // R-new-B Phase G2: lane-mode parse for matrix-A SHAKE-128 XOF.
+    // 8 byte/cycle in, up to 2 coef/cycle out (vs old 1 byte/cycle in).
+    poly_parse_inline_lane_top u_parse (
         .clk(clk),
         .rst_n(rst_n),
         .start(parse_start),
         .done(parse_done),
-        .shake_dout(k_dout),
-        .shake_dout_valid(k_dout_valid),
-        .shake_dout_ready(parse_k_dout_ready),
+        .lane_din(k_lane_dout),
+        .lane_din_valid(k_lane_dout_valid),
+        .lane_din_ready(parse_k_lane_dout_ready),
         .ram_we_a0(parse_ram_we_a0),
         .ram_we_a1(parse_ram_we_a1),
         .ram_addr(parse_ram_addr),
@@ -1201,9 +1216,9 @@ module kpke_encrypt #(
             k_din                 <= 8'd0;
             k_din_valid           <= 1'b0;
             fsm_k_dout_ready      <= 1'b0;
-            // R-new-A Phase D1
+            // R-new-A Phase D1 / R-new-B Phase G2
             squeeze_lane_mode_reg <= 1'b0;
-            k_lane_dout_ready     <= 1'b0;
+            fsm_k_lane_dout_ready <= 1'b0;
             cbd_start             <= 1'b0;
             parse_start           <= 1'b0;
 
@@ -1365,13 +1380,13 @@ module kpke_encrypt #(
                 end
 
                 S_PRF_FINAL: begin
-                    finalize_keccak   <= 1'b1;
-                    fsm_k_dout_ready  <= 1'b1;        // legacy byte path ready
-                    k_lane_dout_ready <= 1'b1;        // R-new-A Phase D1 lane path ready
-                    prf_word_idx      <= 4'd0;
-                    prf_byte_idx      <= 3'd0;
-                    prf_shift         <= 64'd0;
-                    state             <= S_PRF_WAIT;
+                    finalize_keccak       <= 1'b1;
+                    fsm_k_dout_ready      <= 1'b1;        // legacy byte path ready
+                    fsm_k_lane_dout_ready <= 1'b1;        // R-new-A Phase D1 lane path ready
+                    prf_word_idx          <= 4'd0;
+                    prf_byte_idx          <= 3'd0;
+                    prf_shift             <= 64'd0;
+                    state                 <= S_PRF_WAIT;
                 end
 
                 S_PRF_WAIT: begin
@@ -1387,7 +1402,7 @@ module kpke_encrypt #(
                     // shift-register accumulator path fires every 8 cycles.
                     if (prf_advance_lane) begin
                         if (prf_word_idx == 4'd15) begin
-                            k_lane_dout_ready <= 1'b0;
+                            fsm_k_lane_dout_ready <= 1'b0;
                             state <= S_CBD_START;
                         end else begin
                             prf_word_idx <= prf_word_idx + 4'd1;
@@ -1490,7 +1505,13 @@ module kpke_encrypt #(
                 S_U_XOF_INIT: begin
                     init_keccak           <= 1'b1;
                     hash_type             <= 2'b00; // SHAKE128
-                    squeeze_lane_mode_reg <= 1'b0;  // R-new-A Phase D1: byte squeeze for parse
+                    // R-new-B Phase G1: lane squeeze for matrix-A XOF.
+                    // poly_parse_inline_lane_top consumes 8 byte/cyc lanes
+                    // and produces up to 2 coef/cyc, ~2x faster than the
+                    // byte-FSM parse. Sponge init-deferral fix in
+                    // keccak_sponge_top (D2) protects against init-during-
+                    // CALC race.
+                    squeeze_lane_mode_reg <= 1'b1;
                     var_k                 <= 12'd0;
                     k_din                 <= rho_reg[5'd0];
                     k_din_valid           <= 1'b1;
