@@ -279,13 +279,16 @@ module ml_kem_keygen #(
     wire        lane_din_ready_w;
     // R-new-B Phase G1+G2: lane squeeze signals for matrix-A XOF. Latched
     // at SHAKE-128 launch (set 1 for hash_type==2'b00 in launch_keccak).
+    // R-new-C Phase H2: also lane-squeezed for PRF (SHAKE-256, h_type==2'b01).
     reg         squeeze_lane_mode_reg;
     wire [63:0] k_lane_dout;
     wire        k_lane_dout_valid;
     wire        parse_k_lane_dout_ready;
-    // Lane squeeze ready: parse drives during S_XOF_WAIT; else tied 0
-    // (keygen has no FSM-driven lane consumption).
-    wire        k_lane_dout_ready = (state == S_XOF_WAIT) ? parse_k_lane_dout_ready : 1'b0;
+    reg         fsm_k_lane_dout_ready;  // R-new-C H2: FSM-driven for PRF lane path
+    // Lane squeeze ready: parse drives during S_XOF_WAIT (matrix-A);
+    // FSM drives during S_PRF_WAIT (noise PRF); else tied 0.
+    wire        k_lane_dout_ready = (state == S_XOF_WAIT) ? parse_k_lane_dout_ready
+                                                          : fsm_k_lane_dout_ready;
 
     // Byte k_dout_ready: only PRF + G hash use it. Parse moved to lane path.
     wire k_dout_ready = fsm_k_dout_ready;
@@ -357,9 +360,15 @@ module ml_kem_keygen #(
     end
 
     // Dedicated single-port BRAM write block (no reset, single write port).
-    wire        prf_buf_we_w    = (state == S_PRF_WAIT) && k_dout_valid && (prf_byte_idx == 3'd7);
+    // R-new-C Phase H2: dual-path. Lane mode (squeeze_lane_mode_reg=1, set
+    // for SHAKE-256 PRF) writes one full 64-bit lane per cycle; byte mode
+    // accumulates via prf_shift and writes every 8 bytes (legacy).
+    wire        prf_advance_lane = (state == S_PRF_WAIT) && k_lane_dout_valid && fsm_k_lane_dout_ready;
+    wire        prf_advance_byte = (state == S_PRF_WAIT) && k_dout_valid && (prf_byte_idx == 3'd7);
+    wire        prf_buf_we_w    = prf_advance_lane || prf_advance_byte;
     wire [3:0]  prf_buf_waddr_w = prf_word_idx;
-    wire [63:0] prf_buf_wdata_w = {k_dout, prf_shift[63:8]};
+    wire [63:0] prf_buf_wdata_w = prf_advance_lane ? k_lane_dout
+                                                   : {k_dout, prf_shift[63:8]};
     always @(posedge clk) begin
         if (prf_buf_we_w) begin
             prf_buf[prf_buf_waddr_w] <= prf_buf_wdata_w;
@@ -666,10 +675,11 @@ module ml_kem_keygen #(
             // pk_buf (1184B = 148 lanes). G/PRF/XOF stay byte mode because
             // their inputs are short or non-multiple-of-8.
             absorb_lane_mode_reg  <= (h_type == 2'b10);
-            // R-new-B Phase G1: lane squeeze only used by SHAKE-128 matrix-A
-            // XOF (parse consumes 8 byte/cyc lanes). G/PRF/H stay byte
-            // squeeze.
-            squeeze_lane_mode_reg <= (h_type == 2'b00);
+            // R-new-B Phase G1: lane squeeze for SHAKE-128 matrix-A XOF (parse
+            // consumes 8 byte/cyc lanes).
+            // R-new-C Phase H2: also lane squeeze for SHAKE-256 PRF (CBD
+            // consumes 8 byte/cyc lanes from prf_buf). G/H stay byte squeeze.
+            squeeze_lane_mode_reg <= (h_type == 2'b00) || (h_type == 2'b01);
         end
     endtask
 
@@ -735,9 +745,10 @@ module ml_kem_keygen #(
             k_din                 <= 0;
             k_din_valid           <= 0;
             fsm_k_dout_ready      <= 0;
-            // R-new-A Phase E2 / R-new-B Phase G1
+            // R-new-A Phase E2 / R-new-B Phase G1 / R-new-C Phase H2
             absorb_lane_mode_reg  <= 0;
             squeeze_lane_mode_reg <= 0;
+            fsm_k_lane_dout_ready <= 0;
             lane_din_valid_reg    <= 0;
             pk_buf_rd_byte_pos_d1 <= 0;
             
@@ -871,7 +882,9 @@ module ml_kem_keygen #(
                 end
 
                 S_PRF_FINAL: begin
-                    finalize_keccak <= 1;
+                    finalize_keccak       <= 1;
+                    fsm_k_dout_ready      <= 1;       // legacy byte path ready
+                    fsm_k_lane_dout_ready <= 1;       // R-new-C H2 lane path ready
                     prf_word_idx <= 0;
                     prf_byte_idx <= 0;
                     state <= S_PRF_WAIT;
@@ -881,8 +894,19 @@ module ml_kem_keygen #(
                 S_PRF_WAIT: begin
                     // prf_buf write moved to dedicated single-port BRAM block
                     // above. FSM here only updates indices/shift/state.
-                    fsm_k_dout_ready <= 1;
-                    if (k_dout_valid) begin
+                    // R-new-C Phase H2: dual-path. Lane mode advances 1
+                    // word/cycle (16 cyc total); byte mode advances 1 byte/
+                    // cycle (128 cyc total). Mutually exclusive at runtime.
+                    if (prf_advance_lane) begin
+                        if (prf_word_idx == 4'd15) begin
+                            fsm_k_lane_dout_ready <= 1'b0;
+                            // P5-safe-3 equivalent: fold S_CBD hop in lane path too.
+                            cbd_start <= 1;
+                            state    <= S_CBD_WAIT;
+                        end else begin
+                            prf_word_idx <= prf_word_idx + 1;
+                        end
+                    end else if (k_dout_valid) begin
                         prf_shift <= {k_dout, prf_shift[63:8]};
                         if (prf_byte_idx == 7) begin
                             prf_word_idx <= prf_word_idx + 1;
