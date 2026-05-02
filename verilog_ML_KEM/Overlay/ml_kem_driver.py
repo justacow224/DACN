@@ -454,6 +454,112 @@ class MLKem768FullC(MLKem768Fast):
             )
 
 
+# ====================================================================
+# Method B IRQ-driven driver.
+#
+# Replaces _wait_done's busy-poll with a kernel-IRQ wakeup via PYNQ's
+# Interrupt class. The accelerator drives `irq_done = status_done` (level-
+# high while op is complete; deasserts at the next start_pulse). The kernel
+# UIO driver handles edge detect + masking; PYNQ wraps it in an asyncio
+# coroutine. We synchronously wrap with asyncio.run so the API stays
+# identical to MLKem768.
+#
+# Wall-time vs polling: comparable for sub-ms ops (Linux IRQ-to-userspace
+# latency is ~50-200 µs on Cortex-A53). The CPU-availability win (CPU sleeps
+# during HW execution) is the main benefit — quantified by separate
+# experiments where a second thread runs a CPU-bound workload during waits.
+# ====================================================================
+import asyncio
+
+
+class MLKem768IRQ(MLKem768):
+    """Wait for HW completion via PYNQ Interrupt instead of busy-polling.
+
+    Requires the bitstream where ml_kem_top_0/irq_done is wired to the
+    Zynq pl_ps_irq0 path. PYNQ auto-discovers the interrupt object from
+    the .hwh on overlay load.
+    """
+
+    def __init__(self, bitfile, ip_name='ml_kem_top_0'):
+        super().__init__(bitfile, ip_name=ip_name)
+        # Discover the interrupt using three escalating strategies.
+        self._interrupt = self._find_interrupt(ip_name)
+        if self._interrupt is None:
+            # Surface what PYNQ saw to make debugging concrete instead of
+            # a generic 'no interrupt' error.
+            ov = self.overlay
+            keys = [a for a in dir(self.ip) if not a.startswith('_')]
+            irq_pins = getattr(ov, 'interrupt_pins', {})
+            irq_ctrls = getattr(ov, 'interrupt_controllers', {})
+            raise MLKemError(
+                "Could not locate an Interrupt object for "
+                f"{ip_name}/irq_done. PYNQ overlay state:\n"
+                f"  interrupt_pins      = {irq_pins}\n"
+                f"  interrupt_controllers = {irq_ctrls}\n"
+                f"  ip attrs            = {keys}\n"
+                "Likely cause: PYNQ requires either an AXI Intc IP "
+                "between the irq source and pl_ps_irq, or the .hwh did "
+                "not export interrupt metadata for the module_ref pin."
+            )
+
+    def _find_interrupt(self, ip_name):
+        # Strategy 1: PYNQ may auto-attach `interrupt` on the IP.
+        intr = getattr(self.ip, 'interrupt', None)
+        if intr is not None:
+            return intr
+
+        # Strategy 2: overlay-level interrupt_pins map. Try by pin path.
+        ov = self.overlay
+        irq_pins = getattr(ov, 'interrupt_pins', {})
+        for candidate in (f"{ip_name}/irq_done", "ml_kem_top_0/irq_done"):
+            if candidate in irq_pins:
+                from pynq import Interrupt
+                return Interrupt(candidate)
+
+        # Strategy 3: brute-force — instantiate Interrupt directly. Works
+        # if the .hwh has the IRQ wired even if PYNQ didn't auto-attach.
+        try:
+            from pynq import Interrupt
+            intr = Interrupt(f"{ip_name}/irq_done")
+            return intr
+        except Exception:
+            return None
+
+    def _wait_done(self, timeout_s):
+        """Block on the PYNQ Interrupt event, then read REG_CYCLES.
+
+        Uses asyncio.run on a fresh wait coroutine each call. asyncio's
+        wait_for raises asyncio.TimeoutError on timeout.
+        """
+        async def _wait():
+            await asyncio.wait_for(self._interrupt.wait(), timeout=timeout_s)
+
+        try:
+            asyncio.run(_wait())
+        except asyncio.TimeoutError:
+            status = self.ip.read(REG_STATUS)
+            raise MLKemError(
+                f"IRQ wait timeout after {timeout_s}s, STATUS=0x{status:x}"
+            )
+
+        status = self.ip.read(REG_STATUS)
+        if status & STATUS_ERROR:
+            raise MLKemError(f"IP signaled error, STATUS=0x{status:x}")
+        if not (status & STATUS_DONE):
+            # IRQ fired but DONE not set — should not happen given the
+            # `irq_done = status_done` wiring. Fall back to a tight poll.
+            for _ in range(1000):
+                status = self.ip.read(REG_STATUS)
+                if status & STATUS_DONE:
+                    break
+            else:
+                raise MLKemError(
+                    f"IRQ asserted but STATUS_DONE never observed, "
+                    f"STATUS=0x{status:x}"
+                )
+        return self.ip.read(REG_CYCLES)
+
+
 if __name__ == '__main__':
     # Tiny smoke test — confirms overlay loads, CTRL reset state is 0,
     # and all three ops run end-to-end with round-trip ss consistency.

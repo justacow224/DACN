@@ -61,7 +61,19 @@ module ml_kem_top #
     input  wire [1:0]                         m_axi_rresp,
     input  wire                               m_axi_rlast,
     input  wire                               m_axi_rvalid,
-    output reg                                m_axi_rready
+    output reg                                m_axi_rready,
+
+    // R-new-D K2 (IRQ method): level-high IRQ to PS GIC. Mirrors status_done
+    // (asserts when an op completes, deasserts at the next start_pulse). UIO
+    // edge-detection in the kernel handles unmask/wakeup. Routed to
+    // zynq_ultra_ps_e_0.pl_ps_irq0[0] in the BD.
+    //
+    // X_INTERFACE_INFO marks this port as an INTERRUPT source so Vivado
+    // (and downstream PYNQ .hwh parsing) classify it correctly — PYNQ's
+    // Overlay() then exposes self.ml_kem_top_0.interrupt for asyncio.wait().
+    (* X_INTERFACE_INFO = "xilinx.com:signal:interrupt:1.0 IRQ INTERRUPT" *)
+    (* X_INTERFACE_PARAMETER = "SENSITIVITY LEVEL_HIGH" *)
+    output wire                               irq_done
 );
 
     localparam [1:0] OP_KEYGEN = 2'd0;
@@ -118,6 +130,11 @@ module ml_kem_top #
     reg        status_error;
     reg [31:0] cycles_count;
     wire       status_idle = (state == S_IDLE);
+
+    // R-new-D K2: irq is the same level signal as status_done. UIO driver
+    // sees a rising edge when an op transitions to done; status_done falls
+    // at the next start_pulse, re-arming the IRQ for the following op.
+    assign irq_done = status_done;
 
     wire       cfg_start_pulse;
     wire [1:0] cfg_op_sel;
