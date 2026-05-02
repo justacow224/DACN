@@ -41,7 +41,13 @@ module ml_kem_axi_lite_slave #
     output reg [31:0]                         sk_addr,
     output reg [31:0]                         ct_addr,
     output reg [31:0]                         ss_addr,
-    output reg [31:0]                         m_addr
+    output reg [31:0]                         m_addr,
+    // R-new-D K3 (Method E batched API): outer-loop count for KeyGen.
+    // batch_count = 1 → single op (existing behavior). batch_count > 1 →
+    // outer FSM repeats KeyGen N times, advancing pk/sk DDR offsets per
+    // iteration. Same AXI-Lite seed_d/seed_z used for all iterations in
+    // Phase A (Phase B = DDR-sourced seeds, future work).
+    output reg [31:0]                         batch_count
 );
 
     localparam [7:0] REG_CTRL      = 8'h00;
@@ -56,6 +62,8 @@ module ml_kem_axi_lite_slave #
     localparam [7:0] REG_CT_ADDR   = 8'h58;
     localparam [7:0] REG_SS_ADDR   = 8'h5C;
     localparam [7:0] REG_M_ADDR    = 8'h60;
+    // R-new-D K3: batched API
+    localparam [7:0] REG_BATCH_COUNT = 8'h64;
 
     reg aw_hs_seen;
     reg w_hs_seen;
@@ -97,6 +105,7 @@ module ml_kem_axi_lite_slave #
             ct_addr       <= 32'd0;
             ss_addr       <= 32'd0;
             m_addr        <= 32'd0;
+            batch_count   <= 32'd1;
         end else begin
             start_pulse <= 1'b0;
 
@@ -172,6 +181,12 @@ module ml_kem_axi_lite_slave #
                         end
                     end
 
+                    REG_BATCH_COUNT: begin
+                        for (i = 0; i < 4; i = i + 1) begin
+                            if (wstrb_lat[i]) batch_count[i*8 +: 8] <= wdata_lat[i*8 +: 8];
+                        end
+                    end
+
                     default: begin
                     end
                 endcase
@@ -222,6 +237,7 @@ module ml_kem_axi_lite_slave #
                     REG_CT_ADDR: s_axi_rdata <= ct_addr;
                     REG_SS_ADDR: s_axi_rdata <= ss_addr;
                     REG_M_ADDR:  s_axi_rdata <= m_addr;
+                    REG_BATCH_COUNT: s_axi_rdata <= batch_count;
                     default:     s_axi_rdata <= 32'd0;
                 endcase
             end

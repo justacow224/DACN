@@ -122,6 +122,9 @@ module ml_kem_top #
     localparam [7:0] S_BYPASS_FILL_PK       = 8'd32;
     localparam [7:0] S_BYPASS_FILL_SK       = 8'd33;
     localparam [7:0] S_BYPASS_FILL_CT       = 8'd34;
+    // R-new-D K3 (Method E batched API): post-SK-write check that loops
+    // back to S_KEYGEN_START when batch_idx + 1 < batch_count_latched.
+    localparam [7:0] S_BATCH_CHECK          = 8'd35;
 
     reg [7:0] state;
     reg [7:0] ret_state_after_mm;
@@ -145,6 +148,8 @@ module ml_kem_top #
     wire [31:0] cfg_ct_addr;
     wire [31:0] cfg_ss_addr;
     wire [31:0] cfg_m_addr;
+    // R-new-D K3: outer-loop count for batched API.
+    wire [31:0] cfg_batch_count;
 
     reg [1:0] op_sel_latched;
 
@@ -168,6 +173,19 @@ module ml_kem_top #
     wire [4:0]  mm_burst_len_next  = (mm_remaining_words >= {7'd0, MM_BURST_MAX})
                                       ? MM_BURST_MAX
                                       : mm_remaining_words[4:0];
+
+    // R-new-D K3 (Method E batched KeyGen): outer loop bookkeeping.
+    // batch_count_latched captures cfg_batch_count at op start so userspace
+    // can re-program the AXI-Lite reg between batches without affecting an
+    // in-flight batch. batch_idx counts iterations 0..batch_count_latched-1.
+    // 16-bit allows up to 65k keypairs per batch — plenty for thesis bench.
+    reg [15:0] batch_count_latched;
+    reg [15:0] batch_idx;
+    // Per-iteration DDR offsets. PK is 1184 B = 0x4A0, SK is 2400 B = 0x960.
+    // Multipliers stay small (16-bit × 12-bit -> 28-bit fits in 32-bit DDR
+    // address); pre-compute once per iteration to keep mm_base_addr trivial.
+    wire [31:0] batch_pk_offset = {16'd0, batch_idx} * 32'd1184;
+    wire [31:0] batch_sk_offset = {16'd0, batch_idx} * 32'd2400;
 
     // ========================================================================
     // Large transfer buffers: 32-bit word BRAMs with byte-strobe writes.
@@ -1046,7 +1064,8 @@ module ml_kem_top #
         .sk_addr(cfg_sk_addr),
         .ct_addr(cfg_ct_addr),
         .ss_addr(cfg_ss_addr),
-        .m_addr(cfg_m_addr)
+        .m_addr(cfg_m_addr),
+        .batch_count(cfg_batch_count)
     );
 
     generate
@@ -1328,6 +1347,8 @@ module ml_kem_top #
             mm_base_addr     <= 32'd0;
             mm_buf_sel       <= BUF_PK;
             mm_burst_remaining <= 5'd0;
+            batch_count_latched <= 16'd1;
+            batch_idx           <= 16'd0;
 
             m_axi_awaddr   <= {C_M_AXI_ADDR_WIDTH{1'b0}};
             m_axi_awlen    <= 8'd0;
@@ -1359,6 +1380,10 @@ module ml_kem_top #
                         status_error <= 1'b0;
                         cycles_count <= 32'd0;
                         op_sel_latched <= cfg_op_sel;
+                        // R-new-D K3: latch batch count (0 → treated as 1).
+                        batch_idx <= 16'd0;
+                        batch_count_latched <= (cfg_batch_count[15:0] == 16'd0)
+                                                ? 16'd1 : cfg_batch_count[15:0];
                         case (cfg_op_sel)
                             OP_KEYGEN: begin
                                 if (BYPASS_CRYPTO != 0) begin
@@ -1412,7 +1437,10 @@ module ml_kem_top #
                 S_KEYGEN_WAIT: begin
                     if (keygen_done) begin
                         mm_buf_sel <= BUF_PK;
-                        mm_base_addr <= cfg_pk_addr;
+                        // R-new-D K3: per-iteration offset for batched API.
+                        // batch_pk_offset = batch_idx * 1184; for the single-
+                        // op case (batch_count_latched=1) batch_idx stays 0.
+                        mm_base_addr <= cfg_pk_addr + batch_pk_offset;
                         mm_word_total <= 12'd296;
                         mm_word_idx <= 12'd0;
                         ret_state_after_mm <= S_WRITE_SK;
@@ -1571,10 +1599,14 @@ module ml_kem_top #
 
                 S_WRITE_SK: begin
                     mm_buf_sel <= BUF_SK;
-                    mm_base_addr <= cfg_sk_addr;
+                    // R-new-D K3: per-iteration offset; batch_sk_offset = idx*2400.
+                    mm_base_addr <= cfg_sk_addr + batch_sk_offset;
                     mm_word_total <= 12'd600;
                     mm_word_idx <= 12'd0;
-                    ret_state_after_mm <= S_DONE;
+                    // R-new-D K3: route through S_BATCH_CHECK so we can either
+                    // loop back into S_KEYGEN_START (more iterations) or fall
+                    // through to S_DONE (single op or last iteration).
+                    ret_state_after_mm <= S_BATCH_CHECK;
                     state <= S_MM_WR_AW_W;
                 end
 
@@ -1751,6 +1783,19 @@ module ml_kem_top #
                         state <= S_WRITE_PK;
                     end else begin
                         bypass_wait_cnt <= bypass_wait_cnt - 6'd1;
+                    end
+                end
+
+                // R-new-D K3 (Method E batched KeyGen): one keygen+pk+sk
+                // round just finished. If more iterations are queued, bump
+                // batch_idx and re-pulse keygen via S_KEYGEN_START. Else
+                // fall through to S_DONE.
+                S_BATCH_CHECK: begin
+                    if ({16'd0, batch_idx} + 32'd1 < {16'd0, batch_count_latched}) begin
+                        batch_idx <= batch_idx + 16'd1;
+                        state <= S_KEYGEN_START;
+                    end else begin
+                        state <= S_DONE;
                     end
                 end
 

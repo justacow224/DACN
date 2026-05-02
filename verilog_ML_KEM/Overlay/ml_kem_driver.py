@@ -48,6 +48,8 @@ REG_SK_ADDR      = 0x54
 REG_CT_ADDR      = 0x58
 REG_SS_ADDR      = 0x5C
 REG_M_ADDR       = 0x60
+# R-new-D K3 (Method E batched API): outer-loop count for KeyGen.
+REG_BATCH_COUNT  = 0x64
 
 # ---- CTRL encoding (start=bit0, op_sel=bits[2:1]) -----------------------
 CTRL_START_KEYGEN = 0b001  # op_sel=00, start=1
@@ -183,6 +185,66 @@ class MLKem768:
         self.pk.invalidate()
         self.sk.invalidate()
         return bytes(self.pk), bytes(self.sk), cycles
+
+    def batch_keygen(self, seed_d, seed_z, n, timeout_s=None):
+        """R-new-D K3 (Method E batched API): N keygens with one trigger.
+
+        Phase A: same seeds for all N iterations (RTL outer loop reuses
+        cfg_seed_d/cfg_seed_z). Useful for measuring throughput
+        amortization but NOT cryptographically meaningful — all returned
+        keypairs are identical. Phase B (future) would source per-
+        iteration seeds from a DDR array.
+
+        Args:
+            seed_d, seed_z: 32 bytes each. Used for all N iterations.
+            n: batch count (1..65535).
+            timeout_s: scales linearly with n if not specified.
+
+        Returns:
+            (pks_concat: bytes[n*1184], sks_concat: bytes[n*2400], cycles).
+            Caller splits with pks_concat[i*PK_SIZE:(i+1)*PK_SIZE].
+        """
+        if n < 1 or n > 65535:
+            raise ValueError(f"n must be 1..65535, got {n}")
+        if len(seed_d) != 32 or len(seed_z) != 32:
+            raise ValueError("Seeds must be 32 bytes each")
+        self._ensure_idle()
+
+        # Allocate combined output buffers.
+        pk_arr = allocate((n * PK_SIZE,), dtype=np.uint8)
+        sk_arr = allocate((n * SK_SIZE,), dtype=np.uint8)
+
+        try:
+            # Reprogram pk/sk pointers for batch buffers. RTL adds the
+            # per-iteration offset internally (+i*1184 / +i*2400).
+            self.ip.write(REG_PK_ADDR, pk_arr.physical_address)
+            self.ip.write(REG_SK_ADDR, sk_arr.physical_address)
+            self.ip.write(REG_BATCH_COUNT, n)
+            self._write_seed(REG_SEED_D_BASE, seed_d)
+            self._write_seed(REG_SEED_Z_BASE, seed_z)
+
+            self.ip.write(REG_CTRL, CTRL_START_KEYGEN)
+            cycles = self._wait_done(
+                timeout_s if timeout_s is not None
+                else self.DEFAULT_TIMEOUTS_S['keygen'] * n
+            )
+
+            pk_arr.invalidate()
+            sk_arr.invalidate()
+            pks_out = bytes(pk_arr)
+            sks_out = bytes(sk_arr)
+
+            return pks_out, sks_out, cycles
+        finally:
+            # Restore single-op state so a follow-up .keygen() Just Works.
+            self.ip.write(REG_PK_ADDR, self.pk.physical_address)
+            self.ip.write(REG_SK_ADDR, self.sk.physical_address)
+            self.ip.write(REG_BATCH_COUNT, 1)
+            try:
+                pk_arr.freebuffer()
+                sk_arr.freebuffer()
+            except Exception:
+                pass
 
     def encaps(self, pk_bytes, m_bytes, timeout_s=None):
         """Encaps: (pk, m) → (ct, ss).
