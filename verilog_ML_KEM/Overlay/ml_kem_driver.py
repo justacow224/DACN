@@ -69,8 +69,10 @@ SS_SIZE = 32
 M_SIZE  = 32
 
 # Clock period — used for cycle-to-time conversion in prints.
-# R-new-C clock bump: requested 125 MHz; Zynq IOPLL snapped to 124.998749 MHz.
-PL_CLK_HZ = 124_998_749
+# R-new-D signoff at 100 MHz (the project baseline). 125 MHz variant exists at
+# verilog_ML_KEM/bitstream/ml_kem_bd_125mhz.{bit,hwh}; if deploying that,
+# update this constant to 124_998_749.
+PL_CLK_HZ = 100_000_000
 
 
 class MLKemError(RuntimeError):
