@@ -37,10 +37,13 @@ module ml_kem_top #
     output reg                                m_axi_awvalid,
     input  wire                               m_axi_awready,
 
-    output reg  [C_M_AXI_DATA_WIDTH-1:0]      m_axi_wdata,
-    output reg  [(C_M_AXI_DATA_WIDTH/8)-1:0]  m_axi_wstrb,
-    output reg                                m_axi_wlast,
-    output reg                                m_axi_wvalid,
+    // R-new-D K1 (AXI burst): W-channel signals are combinational so wdata
+    // can track the next BRAM beat without a 1-cyc wrong-data window. The
+    // FSM's only W-channel state is S_MM_WR_W; assertion is gated by it.
+    output wire [C_M_AXI_DATA_WIDTH-1:0]      m_axi_wdata,
+    output wire [(C_M_AXI_DATA_WIDTH/8)-1:0]  m_axi_wstrb,
+    output wire                               m_axi_wlast,
+    output wire                               m_axi_wvalid,
     input  wire                               m_axi_wready,
 
     input  wire [1:0]                         m_axi_bresp,
@@ -135,6 +138,19 @@ module ml_kem_top #
     reg [11:0] mm_word_total;
     reg [31:0] mm_base_addr;
     reg [3:0]  mm_buf_sel;
+
+    // R-new-D K1 (AXI burst): track beats remaining in current burst.
+    // Burst length is min(MM_BURST_MAX, mm_word_total - mm_word_idx).
+    // 5-bit holds 0..16 (16 = max burst per AXI4 INCR up to 4KB boundary).
+    localparam [4:0] MM_BURST_MAX = 5'd16;
+    reg [4:0] mm_burst_remaining;
+
+    // Burst length for the upcoming AR/AW: min(16, total - idx). Computed
+    // combinationally so RD_AR / WR_AW_W states can latch it on entry.
+    wire [11:0] mm_remaining_words = mm_word_total - mm_word_idx;
+    wire [4:0]  mm_burst_len_next  = (mm_remaining_words >= {7'd0, MM_BURST_MAX})
+                                      ? MM_BURST_MAX
+                                      : mm_remaining_words[4:0];
 
     // ========================================================================
     // Large transfer buffers: 32-bit word BRAMs with byte-strobe writes.
@@ -910,18 +926,32 @@ module ml_kem_top #
     wire preload_dk_fetch = (state == S_DECAPS_PRELOAD_DK_FETCH);
     wire preload_ct_fetch = (state == S_DECAPS_PRELOAD_CT_FETCH);
     wire mm_wr_fetch      = (state == S_MM_WR_FETCH);
+    // R-new-D K1: keep BRAM rd_en high through the multi-beat W phase so
+    // back-to-back beats stay fed; rd_addr looks 1 ahead to absorb the
+    // 1-cyc BRAM latency. Lookahead is GATED by wready: when the slave is
+    // not ready, mm_word_idx stays put and so must rd_addr (otherwise BRAM
+    // would advance to M[K+1] while we're still trying to send beat K).
+    wire mm_wr_active     = mm_wr_fetch || (state == S_MM_WR_W);
+    wire [11:0] mm_wr_lookahead = mm_word_idx + ((state == S_MM_WR_W) && m_axi_wready ? 12'd1 : 12'd0);
+    wire        use_lookahead   = (state == S_MM_WR_W);
 
-    assign pk_rd_en   = preload_pk_fetch || (mm_wr_fetch && (mm_buf_sel == BUF_PK));
-    assign pk_rd_addr = preload_pk_fetch ? byte_idx[10:2] : mm_word_idx[8:0];
+    assign pk_rd_en   = preload_pk_fetch || (mm_wr_active && (mm_buf_sel == BUF_PK));
+    assign pk_rd_addr = preload_pk_fetch ? byte_idx[10:2] :
+                        use_lookahead    ? mm_wr_lookahead[8:0] :
+                                           mm_word_idx[8:0];
 
-    assign sk_rd_en   = mm_wr_fetch && (mm_buf_sel == BUF_SK);
-    assign sk_rd_addr = mm_word_idx[9:0];
+    assign sk_rd_en   = mm_wr_active && (mm_buf_sel == BUF_SK);
+    assign sk_rd_addr = use_lookahead ? mm_wr_lookahead[9:0] : mm_word_idx[9:0];
 
-    assign ct_rd_en   = preload_ct_fetch || (mm_wr_fetch && (mm_buf_sel == BUF_CT));
-    assign ct_rd_addr = preload_ct_fetch ? byte_idx[10:2] : mm_word_idx[8:0];
+    assign ct_rd_en   = preload_ct_fetch || (mm_wr_active && (mm_buf_sel == BUF_CT));
+    assign ct_rd_addr = preload_ct_fetch ? byte_idx[10:2] :
+                        use_lookahead    ? mm_wr_lookahead[8:0] :
+                                           mm_word_idx[8:0];
 
-    assign dk_rd_en   = preload_dk_fetch || (mm_wr_fetch && (mm_buf_sel == BUF_DK));
-    assign dk_rd_addr = preload_dk_fetch ? byte_idx[11:2] : mm_word_idx[9:0];
+    assign dk_rd_en   = preload_dk_fetch || (mm_wr_active && (mm_buf_sel == BUF_DK));
+    assign dk_rd_addr = preload_dk_fetch ? byte_idx[11:2] :
+                        use_lookahead    ? mm_wr_lookahead[9:0] :
+                                           mm_word_idx[9:0];
 
     // Word source for AXI-MM write path. For BUF_M / BUF_SS we read combinatori-
     // ally from the small reg arrays; for BRAM-backed buffers we use rd_data
@@ -940,6 +970,14 @@ module ml_kem_top #
                                   (mm_buf_sel == BUF_M)  ? m_word :
                                   (mm_buf_sel == BUF_SS) ? ss_word :
                                                            32'd0;
+
+    // R-new-D K1: combinational W-channel drives. wvalid is asserted for
+    // every cycle the FSM is in S_MM_WR_W; wdata tracks the next BRAM beat
+    // via the lookahead rd_addr; wlast asserts on the final beat of a burst.
+    assign m_axi_wdata  = (state == S_MM_WR_W) ? write_word_comb : {C_M_AXI_DATA_WIDTH{1'b0}};
+    assign m_axi_wstrb  = {(C_M_AXI_DATA_WIDTH/8){1'b1}};
+    assign m_axi_wvalid = (state == S_MM_WR_W);
+    assign m_axi_wlast  = (state == S_MM_WR_W) && (mm_burst_remaining == 5'd1);
 
     // Byte-lane mux for preload paths (rd_data is observable in *_SEND state).
     wire [1:0] byte_lane = byte_idx[1:0];
@@ -1272,16 +1310,15 @@ module ml_kem_top #
             mm_word_total    <= 12'd0;
             mm_base_addr     <= 32'd0;
             mm_buf_sel       <= BUF_PK;
+            mm_burst_remaining <= 5'd0;
 
             m_axi_awaddr   <= {C_M_AXI_ADDR_WIDTH{1'b0}};
             m_axi_awlen    <= 8'd0;
             m_axi_awsize   <= 3'd2;
             m_axi_awburst  <= 2'b01;
             m_axi_awvalid  <= 1'b0;
-            m_axi_wdata    <= {C_M_AXI_DATA_WIDTH{1'b0}};
-            m_axi_wstrb    <= {(C_M_AXI_DATA_WIDTH/8){1'b1}};
-            m_axi_wlast    <= 1'b1;
-            m_axi_wvalid   <= 1'b0;
+            // R-new-D K1: m_axi_w{data,strb,valid,last} are now combinational;
+            // no reset assignments needed.
             m_axi_bready   <= 1'b0;
             m_axi_araddr   <= {C_M_AXI_ADDR_WIDTH{1'b0}};
             m_axi_arlen    <= 8'd0;
@@ -1537,12 +1574,18 @@ module ml_kem_top #
                     state <= S_MM_WR_AW_W;
                 end
 
+                // R-new-D K1: multi-beat read. Burst length = min(16, remaining).
+                // arlen latched on first cycle of AR; mm_burst_remaining tracks
+                // beats received during the R phase.
                 S_MM_RD_AR: begin
-                    m_axi_araddr  <= mm_base_addr + {{(C_M_AXI_ADDR_WIDTH-14){1'b0}}, mm_word_idx, 2'b00};
-                    m_axi_arlen   <= 8'd0;
-                    m_axi_arsize  <= 3'd2;
-                    m_axi_arburst <= 2'b01;
-                    m_axi_arvalid <= 1'b1;
+                    if (!m_axi_arvalid) begin
+                        m_axi_araddr  <= mm_base_addr + {{(C_M_AXI_ADDR_WIDTH-14){1'b0}}, mm_word_idx, 2'b00};
+                        m_axi_arlen   <= {3'd0, mm_burst_len_next - 5'd1};
+                        m_axi_arsize  <= 3'd2;
+                        m_axi_arburst <= 2'b01;
+                        m_axi_arvalid <= 1'b1;
+                        mm_burst_remaining <= mm_burst_len_next;
+                    end
                     m_axi_rready  <= 1'b0;
                     if (m_axi_arvalid && m_axi_arready) begin
                         m_axi_arvalid <= 1'b0;
@@ -1554,39 +1597,51 @@ module ml_kem_top #
                 // Word write into the target BRAM is handled by the comb
                 // write-port mux (axi_word_we => 4'b1111 strobes with
                 // m_axi_rdata). BUF_M still goes to the reg array via its
-                // dedicated always block below.
+                // dedicated always block below. Multi-beat: each rvalid stores
+                // one word; on rlast we either issue the next AR (more bursts)
+                // or return to ret_state_after_mm.
                 S_MM_RD_R: begin
                     if (m_axi_rvalid && m_axi_rready) begin
-                        m_axi_rready <= 1'b0;
                         if (m_axi_rresp != 2'b00) begin
+                            m_axi_rready <= 1'b0;
                             state <= S_ERR;
                         end else begin
-                            if (mm_word_idx == (mm_word_total - 12'd1)) begin
-                                mm_word_idx <= 12'd0;
-                                byte_idx <= 12'd0;
-                                state <= ret_state_after_mm;
-                            end else begin
-                                mm_word_idx <= mm_word_idx + 12'd1;
-                                state <= S_MM_RD_AR;
+                            mm_word_idx <= mm_word_idx + 12'd1;
+                            mm_burst_remaining <= mm_burst_remaining - 5'd1;
+                            if (m_axi_rlast) begin
+                                m_axi_rready <= 1'b0;
+                                if (mm_word_idx == (mm_word_total - 12'd1)) begin
+                                    mm_word_idx <= 12'd0;
+                                    byte_idx <= 12'd0;
+                                    state <= ret_state_after_mm;
+                                end else begin
+                                    state <= S_MM_RD_AR;
+                                end
                             end
                         end
                     end
                 end
 
-                // AXI-MM write path:
-                //   AW_W  : issue AW, wait for awready.
-                //   FETCH : one cycle to issue BRAM read (rd_en comb) — rd_data
-                //           settles at end of this cycle.
-                //   W     : latch rd_data/m_word/ss_word into m_axi_wdata and
-                //           assert wvalid; wait for wready → B.
-                //   B     : wait for bvalid.
+                // R-new-D K1: multi-beat write path.
+                //   AW_W  : issue AW with awlen = burst_len-1, latch
+                //           mm_burst_remaining. Wait awready.
+                //   FETCH : one cycle to settle first BRAM rd_data
+                //           (rd_addr = mm_word_idx during FETCH; lookahead
+                //           kicks in once we enter W).
+                //   W     : combinational wvalid/wdata/wlast (see assigns
+                //           above). Each wready advances mm_word_idx and
+                //           decrements mm_burst_remaining; on the last beat
+                //           we move to B.
+                //   B     : wait bvalid; on last burst go to ret_state, else
+                //           re-enter AW for the next burst.
                 S_MM_WR_AW_W: begin
                     if (!m_axi_awvalid) begin
                         m_axi_awaddr  <= mm_base_addr + {{(C_M_AXI_ADDR_WIDTH-14){1'b0}}, mm_word_idx, 2'b00};
-                        m_axi_awlen   <= 8'd0;
+                        m_axi_awlen   <= {3'd0, mm_burst_len_next - 5'd1};
                         m_axi_awsize  <= 3'd2;
                         m_axi_awburst <= 2'b01;
                         m_axi_awvalid <= 1'b1;
+                        mm_burst_remaining <= mm_burst_len_next;
                     end
                     if (m_axi_awvalid && m_axi_awready) begin
                         m_axi_awvalid <= 1'b0;
@@ -1599,16 +1654,20 @@ module ml_kem_top #
                 end
 
                 S_MM_WR_W: begin
-                    if (!m_axi_wvalid) begin
-                        m_axi_wdata  <= write_word_comb;
-                        m_axi_wstrb  <= 4'hF;
-                        m_axi_wlast  <= 1'b1;
-                        m_axi_wvalid <= 1'b1;
-                    end
-                    if (m_axi_wvalid && m_axi_wready) begin
-                        m_axi_wvalid <= 1'b0;
-                        m_axi_bready <= 1'b1;
-                        state <= S_MM_WR_B;
+                    if (m_axi_wready) begin
+                        // Beat captured by slave this cycle.
+                        if (mm_burst_remaining == 5'd1) begin
+                            // Last beat of this burst → handshake B.
+                            m_axi_bready <= 1'b1;
+                            mm_burst_remaining <= 5'd0;
+                            // mm_word_idx still advances so the post-burst
+                            // check in WR_B sees the updated count.
+                            mm_word_idx <= mm_word_idx + 12'd1;
+                            state <= S_MM_WR_B;
+                        end else begin
+                            mm_word_idx <= mm_word_idx + 12'd1;
+                            mm_burst_remaining <= mm_burst_remaining - 5'd1;
+                        end
                     end
                 end
 
@@ -1617,11 +1676,12 @@ module ml_kem_top #
                         m_axi_bready <= 1'b0;
                         if (m_axi_bresp != 2'b00) begin
                             state <= S_ERR;
-                        end else if (mm_word_idx == (mm_word_total - 12'd1)) begin
+                        end else if (mm_word_idx == mm_word_total) begin
                             mm_word_idx <= 12'd0;
                             state <= ret_state_after_mm;
                         end else begin
-                            mm_word_idx <= mm_word_idx + 12'd1;
+                            // More bursts remaining; mm_word_idx already
+                            // points to the first word of the next burst.
                             state <= S_MM_WR_AW_W;
                         end
                     end

@@ -459,6 +459,16 @@ module tb_ml_kem_top;
     end
     endtask
 
+    // R-new-D K1: multi-beat AXI4 INCR slave model. Each W handshake within
+    // a burst writes to ddr_mem[burst_addr], with burst_addr advancing by 4
+    // (arsize=2, 4-byte beats). bvalid asserts on wlast handshake. R-channel
+    // streams beats with rdata pre-fetched per beat and rlast on the final.
+    reg [31:0] mm_wr_burst_addr;
+    reg        mm_wr_aw_seen;
+    reg [31:0] mm_rd_burst_addr;
+    reg [4:0]  mm_rd_beats_left;
+    reg        mm_rd_active;
+
     always @(posedge clk) begin
         if (!rst_n) begin
             m_axi_awready <= 1'b1;
@@ -468,13 +478,18 @@ module tb_ml_kem_top;
             m_axi_arready <= 1'b1;
             m_axi_rdata   <= 32'd0;
             m_axi_rresp   <= 2'b00;
-            m_axi_rlast   <= 1'b1;
+            m_axi_rlast   <= 1'b0;
             m_axi_rvalid  <= 1'b0;
             awaddr_lat    <= 32'd0;
             wdata_lat     <= 32'd0;
             wstrb_lat     <= 4'd0;
             aw_seen       <= 1'b0;
             w_seen        <= 1'b0;
+            mm_wr_burst_addr <= 32'd0;
+            mm_wr_aw_seen    <= 1'b0;
+            mm_rd_burst_addr <= 32'd0;
+            mm_rd_beats_left <= 5'd0;
+            mm_rd_active     <= 1'b0;
             mm_stall_ctr  <= 8'd0;
             mm_stall_enable <= 1'b0;
             inject_bresp_err <= 1'b0;
@@ -494,46 +509,57 @@ module tb_ml_kem_top;
                 m_axi_arready <= 1'b1;
             end
 
+            // ----- Write address channel: latch start addr per burst -----
             if (m_axi_awvalid && m_axi_awready) begin
-                awaddr_lat <= m_axi_awaddr;
-                aw_seen    <= 1'b1;
+                mm_wr_burst_addr <= m_axi_awaddr;
+                mm_wr_aw_seen    <= 1'b1;
+                awaddr_lat       <= m_axi_awaddr;  // legacy alias for probes
             end
-            if (m_axi_wvalid && m_axi_wready) begin
-                wdata_lat <= m_axi_wdata;
+
+            // ----- Write data channel: per-beat write, advance addr -----
+            if (m_axi_wvalid && m_axi_wready && mm_wr_aw_seen) begin
+                if (m_axi_wstrb[0]) ddr_mem[mm_wr_burst_addr + 32'd0] <= m_axi_wdata[7:0];
+                if (m_axi_wstrb[1]) ddr_mem[mm_wr_burst_addr + 32'd1] <= m_axi_wdata[15:8];
+                if (m_axi_wstrb[2]) ddr_mem[mm_wr_burst_addr + 32'd2] <= m_axi_wdata[23:16];
+                if (m_axi_wstrb[3]) ddr_mem[mm_wr_burst_addr + 32'd3] <= m_axi_wdata[31:24];
+                mm_wr_burst_addr <= mm_wr_burst_addr + 32'd4;
+                wdata_lat <= m_axi_wdata;       // legacy alias for probes
                 wstrb_lat <= m_axi_wstrb;
-                w_seen <= 1'b1;
-            end
-            if (aw_seen && w_seen && !m_axi_bvalid) begin
-                if (wstrb_lat[0]) ddr_mem[awaddr_lat + 32'd0] <= wdata_lat[7:0];
-                if (wstrb_lat[1]) ddr_mem[awaddr_lat + 32'd1] <= wdata_lat[15:8];
-                if (wstrb_lat[2]) ddr_mem[awaddr_lat + 32'd2] <= wdata_lat[23:16];
-                if (wstrb_lat[3]) ddr_mem[awaddr_lat + 32'd3] <= wdata_lat[31:24];
-                if (inject_bresp_err) begin
-                    if (inject_bresp_err_beat == 12'd0) begin
-                        m_axi_bresp <= 2'b10;
-                        inject_bresp_err <= 1'b0;
+
+                if (m_axi_wlast) begin
+                    // End of burst → bvalid (with optional bresp injection).
+                    mm_wr_aw_seen <= 1'b0;
+                    if (inject_bresp_err) begin
+                        if (inject_bresp_err_beat == 12'd0) begin
+                            m_axi_bresp <= 2'b10;
+                            inject_bresp_err <= 1'b0;
+                        end else begin
+                            inject_bresp_err_beat <= inject_bresp_err_beat - 12'd1;
+                            m_axi_bresp <= 2'b00;
+                        end
                     end else begin
-                        inject_bresp_err_beat <= inject_bresp_err_beat - 12'd1;
                         m_axi_bresp <= 2'b00;
                     end
-                end else begin
-                    m_axi_bresp <= 2'b00;
+                    m_axi_bvalid <= 1'b1;
                 end
-                m_axi_bvalid <= 1'b1;
-                aw_seen <= 1'b0;
-                w_seen <= 1'b0;
             end
             if (m_axi_bvalid && m_axi_bready) begin
                 m_axi_bvalid <= 1'b0;
             end
 
-            if (m_axi_arvalid && m_axi_arready && !m_axi_rvalid) begin
+            // ----- Read address channel: setup multi-beat burst -----
+            if (m_axi_arvalid && m_axi_arready && !mm_rd_active) begin
+                mm_rd_burst_addr <= m_axi_araddr;
+                mm_rd_beats_left <= {1'b0, m_axi_arlen[3:0]} + 5'd1;
+                mm_rd_active <= 1'b1;
+                // First beat data + rresp inject + rlast for arlen==0.
                 m_axi_rdata <= {
                     ddr_mem[m_axi_araddr + 32'd3],
                     ddr_mem[m_axi_araddr + 32'd2],
                     ddr_mem[m_axi_araddr + 32'd1],
                     ddr_mem[m_axi_araddr + 32'd0]
                 };
+                m_axi_rlast <= (m_axi_arlen == 8'd0);
                 if (inject_rresp_err) begin
                     if (inject_rresp_err_beat == 12'd0) begin
                         m_axi_rresp <= 2'b10;
@@ -547,9 +573,25 @@ module tb_ml_kem_top;
                 end
                 m_axi_rvalid <= 1'b1;
             end
+            // ----- Read data channel: advance per beat, drop rvalid on last -----
             if (m_axi_rvalid && m_axi_rready) begin
-                m_axi_rvalid <= 1'b0;
-                m_axi_rresp <= 2'b00;
+                if (m_axi_rlast) begin
+                    m_axi_rvalid <= 1'b0;
+                    m_axi_rlast  <= 1'b0;
+                    m_axi_rresp  <= 2'b00;
+                    mm_rd_active <= 1'b0;
+                end else begin
+                    // Pre-fetch next beat data.
+                    mm_rd_burst_addr <= mm_rd_burst_addr + 32'd4;
+                    mm_rd_beats_left <= mm_rd_beats_left - 5'd1;
+                    m_axi_rdata <= {
+                        ddr_mem[mm_rd_burst_addr + 32'd4 + 32'd3],
+                        ddr_mem[mm_rd_burst_addr + 32'd4 + 32'd2],
+                        ddr_mem[mm_rd_burst_addr + 32'd4 + 32'd1],
+                        ddr_mem[mm_rd_burst_addr + 32'd4 + 32'd0]
+                    };
+                    m_axi_rlast <= (mm_rd_beats_left == 5'd2);
+                end
             end
         end
     end
