@@ -255,6 +255,205 @@ def cycles_to_us(cycles, clk_hz=PL_CLK_HZ):
     return cycles / clk_hz * 1e6
 
 
+# ====================================================================
+# C-bypass fast driver (Method C in perf-optimization-log).
+# Replaces the Python `while` polling loop with a compiled C function
+# that reads the same mmap'd register region in a tight loop. Saves
+# ~1-5 µs per poll (Python wrapper overhead) → tens of µs to ~ms
+# per op depending on latency.
+#
+# Build on board:
+#   cd /root/jupyter_notebooks/verilog_ML_KEM/Overlay && make
+#
+# Usage:
+#   from ml_kem_driver import MLKem768Fast
+#   with MLKem768Fast(bitfile) as kem: ...
+# ====================================================================
+
+import ctypes
+
+
+_FAST_LIB = None
+_FAST_LIB_LOAD_ERR = None
+
+
+def _load_fast_lib():
+    """Lazy-load libmlkemfast.so. Errors are deferred so importing the
+    module never fails; the user sees a clear error only if they try to
+    instantiate MLKem768Fast / MLKem768FullC without having built the .so."""
+    global _FAST_LIB, _FAST_LIB_LOAD_ERR
+    if _FAST_LIB is not None or _FAST_LIB_LOAD_ERR is not None:
+        return
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, 'libmlkemfast.so'),
+        '/root/jupyter_notebooks/verilog_ML_KEM/Overlay/libmlkemfast.so',
+        './libmlkemfast.so',
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                lib = ctypes.CDLL(p)
+                u32p = ctypes.POINTER(ctypes.c_uint32)
+                u8p  = ctypes.POINTER(ctypes.c_uint8)
+                lib.mlkem_wait_done.restype = ctypes.c_int64
+                lib.mlkem_wait_done.argtypes = [u32p, ctypes.c_uint32]
+                # Method C-full per-op entrypoints
+                lib.mlkem_keygen_run.restype = ctypes.c_int64
+                lib.mlkem_keygen_run.argtypes = [u32p, u8p, u8p, ctypes.c_uint32]
+                lib.mlkem_encaps_run.restype = ctypes.c_int64
+                lib.mlkem_encaps_run.argtypes = [u32p, ctypes.c_uint32]
+                lib.mlkem_decaps_run.restype = ctypes.c_int64
+                lib.mlkem_decaps_run.argtypes = [u32p, ctypes.c_uint32]
+                _FAST_LIB = lib
+                return
+            except (OSError, AttributeError) as e:
+                _FAST_LIB_LOAD_ERR = f"failed to load {p}: {e}"
+                return
+    _FAST_LIB_LOAD_ERR = (
+        "libmlkemfast.so not found. Build it on the board with "
+        "`cd /root/jupyter_notebooks/verilog_ML_KEM/Overlay && make`."
+    )
+
+
+class MLKem768Fast(MLKem768):
+    """Drop-in subclass that uses a C busy-poll for `_wait_done`.
+
+    Identical API to `MLKem768`. Only the polling loop is replaced —
+    register writes, cache flush/invalidate, and PYNQ buffer mgmt are
+    unchanged. Use this for latency-sensitive workloads or for the
+    A-vs-C software-stack comparison benchmark.
+    """
+
+    def __init__(self, bitfile, ip_name='ml_kem_top_0'):
+        super().__init__(bitfile, ip_name=ip_name)
+        _load_fast_lib()
+        if _FAST_LIB is None:
+            raise MLKemError(_FAST_LIB_LOAD_ERR)
+        self._fast_lib = _FAST_LIB
+        # Raw pointer to the IP's mmap'd register region. PYNQ exposes
+        # the region as a numpy uint32 array; we hand its base address
+        # to C. The C side only reads STATUS (word 1) and CYCLES (word 2),
+        # so any AXI-Lite alignment guarantees the kernel gives us are
+        # sufficient.
+        self._reg_ptr = self.ip.mmio.array.ctypes.data_as(
+            ctypes.POINTER(ctypes.c_uint32)
+        )
+
+    def _wait_done(self, timeout_s):
+        timeout_us = int(timeout_s * 1_000_000)
+        result = self._fast_lib.mlkem_wait_done(self._reg_ptr, timeout_us)
+        if result == -1:
+            status = self.ip.read(REG_STATUS)
+            raise MLKemError(f"IP signaled error, STATUS=0x{status:x}")
+        if result == -2:
+            status = self.ip.read(REG_STATUS)
+            raise MLKemError(
+                f"Operation timeout after {timeout_s}s, "
+                f"STATUS=0x{status:x}"
+            )
+        return result & 0xFFFFFFFF
+
+
+# ====================================================================
+# Method C-full driver — entire per-op flow in C (Level 1).
+#
+# What's in C:    register writes (seeds + start), polling, cycles read.
+# What's in Py:   buffer copy + cache flush()/invalidate() (still PYNQ).
+#
+# Theoretical ceiling: ~−25-45% wall vs Method A (frees up the Python
+# overhead of 17 mmio writes + last-poll detect + cycles read). Cache
+# ops + buffer copy still cost ~100-200 µs and dominate the residual.
+# Level 2 (cache via aarch64 DC instructions) would be a future step.
+# ====================================================================
+class MLKem768FullC(MLKem768Fast):
+    """Per-op execution path is one C call. Cache mgmt stays in Python."""
+
+    def keygen(self, seed_d, seed_z, timeout_s=None):
+        if len(seed_d) != 32 or len(seed_z) != 32:
+            raise ValueError("Seeds must be 32 bytes each")
+        self._ensure_idle()
+
+        timeout_us = int(
+            (timeout_s if timeout_s is not None
+             else self.DEFAULT_TIMEOUTS_S['keygen']) * 1_000_000
+        )
+
+        # 32-byte ctypes views of the user-provided seed buffers.
+        d_buf = (ctypes.c_uint8 * 32).from_buffer_copy(seed_d)
+        z_buf = (ctypes.c_uint8 * 32).from_buffer_copy(seed_z)
+
+        cycles = self._fast_lib.mlkem_keygen_run(
+            self._reg_ptr,
+            ctypes.cast(d_buf, ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.cast(z_buf, ctypes.POINTER(ctypes.c_uint8)),
+            timeout_us,
+        )
+        self._raise_on_run_error(cycles, timeout_s, 'keygen')
+
+        self.pk.invalidate()
+        self.sk.invalidate()
+        return bytes(self.pk), bytes(self.sk), cycles & 0xFFFFFFFF
+
+    def encaps(self, pk_bytes, m_bytes, timeout_s=None):
+        if len(pk_bytes) != PK_SIZE:
+            raise ValueError(f"pk must be {PK_SIZE} bytes")
+        if len(m_bytes) != M_SIZE:
+            raise ValueError(f"m must be {M_SIZE} bytes")
+        self._ensure_idle()
+
+        self.pk[:] = np.frombuffer(pk_bytes, dtype=np.uint8)
+        self.m[:]  = np.frombuffer(m_bytes,  dtype=np.uint8)
+        self.pk.flush()
+        self.m.flush()
+
+        timeout_us = int(
+            (timeout_s if timeout_s is not None
+             else self.DEFAULT_TIMEOUTS_S['encaps']) * 1_000_000
+        )
+        cycles = self._fast_lib.mlkem_encaps_run(self._reg_ptr, timeout_us)
+        self._raise_on_run_error(cycles, timeout_s, 'encaps')
+
+        self.ct.invalidate()
+        self.ss.invalidate()
+        return bytes(self.ct), bytes(self.ss), cycles & 0xFFFFFFFF
+
+    def decaps(self, sk_bytes, ct_bytes, timeout_s=None):
+        if len(sk_bytes) != SK_SIZE:
+            raise ValueError(f"sk must be {SK_SIZE} bytes")
+        if len(ct_bytes) != CT_SIZE:
+            raise ValueError(f"ct must be {CT_SIZE} bytes")
+        self._ensure_idle()
+
+        self.sk[:] = np.frombuffer(sk_bytes, dtype=np.uint8)
+        self.ct[:] = np.frombuffer(ct_bytes, dtype=np.uint8)
+        self.sk.flush()
+        self.ct.flush()
+
+        timeout_us = int(
+            (timeout_s if timeout_s is not None
+             else self.DEFAULT_TIMEOUTS_S['decaps']) * 1_000_000
+        )
+        cycles = self._fast_lib.mlkem_decaps_run(self._reg_ptr, timeout_us)
+        self._raise_on_run_error(cycles, timeout_s, 'decaps')
+
+        self.ss.invalidate()
+        return bytes(self.ss), cycles & 0xFFFFFFFF
+
+    def _raise_on_run_error(self, code, timeout_s, op_name):
+        if code == -1:
+            status = self.ip.read(REG_STATUS)
+            raise MLKemError(
+                f"{op_name}: IP signaled error, STATUS=0x{status:x}"
+            )
+        if code == -2:
+            status = self.ip.read(REG_STATUS)
+            raise MLKemError(
+                f"{op_name}: timeout after {timeout_s}s, "
+                f"STATUS=0x{status:x}"
+            )
+
+
 if __name__ == '__main__':
     # Tiny smoke test — confirms overlay loads, CTRL reset state is 0,
     # and all three ops run end-to-end with round-trip ss consistency.
