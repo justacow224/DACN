@@ -67,7 +67,8 @@ SS_SIZE = 32
 M_SIZE  = 32
 
 # Clock period — used for cycle-to-time conversion in prints.
-PL_CLK_HZ = 100_000_000
+# R-new-C clock bump: requested 125 MHz; Zynq IOPLL snapped to 124.998749 MHz.
+PL_CLK_HZ = 124_998_749
 
 
 class MLKemError(RuntimeError):

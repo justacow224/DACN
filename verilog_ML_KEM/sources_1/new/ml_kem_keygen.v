@@ -1170,22 +1170,29 @@ module ml_kem_keygen #(
                 end
 
                 S_PACK_SK_PK_WAIT: begin
-                    // Consume one read-latency cycle for pk_buf.
+                    // R-new-C I1: pre-advance pk_buf addr to 1 so the pipelined
+                    // WRITE state can issue 1 byte/cyc. Prime set addr=0 last
+                    // cycle (BRAM data for byte 0 lands next cycle aligned with
+                    // first WRITE entry).
+                    pk_buf_rd_addr <= 11'd1;
                     state <= S_PACK_SK_PK_WRITE;
                 end
 
                 S_PACK_SK_PK_WRITE: begin
+                    // R-new-C I1: pipelined sk||pk pack — 1 byte / cycle.
+                    // Data alignment: at cycle T (var_k=K), pk_buf_rd_data carries
+                    // byte K because addr_FF at T-1 was K (driven by RHS at T-2:
+                    // addr <= K-2+2). byte_pos_d1 latched at end of T-1 from
+                    // addr_FF[2:0] at T-1 = K[2:0], aligning byte mux. Pre-advance
+                    // by 2 keeps the pipeline filled.
                     if (var_k == 1183) begin
                         pk_buf_rd_en <= 0;
                         var_k <= 0;
                         state <= S_PACK_SK_HPK;
                     end else begin
-                        // Issue next read, then wait one cycle before next write to
-                        // align with synchronous BRAM read latency.
+                        pk_buf_rd_addr <= var_k[10:0] + 11'd2;
                         var_k <= var_k + 1;
-                        pk_buf_rd_addr <= var_k[10:0] + 11'd1;
-                        pk_buf_rd_en <= 1;
-                        state <= S_PACK_SK_PK_WAIT;
+                        // pk_buf_rd_en already 1 from prime; held across loop.
                     end
                 end
 
