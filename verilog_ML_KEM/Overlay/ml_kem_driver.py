@@ -21,6 +21,33 @@ DDR buffers must land in HPC0_DDR_LOW (0x0000_0000 – 0x7FFF_FFFF per the
 Address Editor in the BD). PYNQ `allocate()` returns cma-backed arrays in
 that range automatically.
 
+Cache policy (Scenario B Opt #1, "cache-coherent DMA"):
+    Single-op buffers are allocated with `cacheable=False` so the CMA
+    region is mapped uncached on the CPU side. The PL master drives
+    AxCACHE=0000 (device, non-bufferable) by default, and HPC0 forwards
+    device-type transactions straight to DDR. With both sides bypassing
+    caches, `flush()` / `invalidate()` are unnecessary and have been
+    removed from every per-op path — saving ~50 µs per cache call on
+    PYNQ ≥ 3.0. Batched output buffers (`pk_arr/sk_arr` in
+    `batch_keygen`) stay cacheable and use one bulk `invalidate()` per
+    buffer, since uncached readout of the ~358 KB result is the slower
+    path at large n.
+
+Return type policy (Scenario B Opt #2, "bytes() zero-copy"):
+    `keygen`, `encaps`, `decaps` return `memoryview` for the large
+    buffers (pk, sk, ct) instead of bytes — no copy, just a view onto
+    the driver's internal CMA buffer. **The view is invalidated by the
+    next call on the same MLKem768 instance** that touches that buffer:
+        keygen   → writes self.pk, self.sk
+        encaps   → writes self.pk (CPU copy of input), self.ct, self.ss
+        decaps   → writes self.sk, self.ct (CPU copies of inputs), self.ss
+    Use `bytes(view)` or `view.tobytes()` to materialize a snapshot if
+    the data must outlive the next op. The shared secret `ss` is
+    always returned as `bytes` (32 B, copy is free) because round-trip
+    flows compare ss_enc against ss_dec **after** decaps overwrites
+    self.ss. `batch_keygen` returns `bytes` for both pk_arr and sk_arr
+    since those are short-lived per-batch allocations.
+
 Usage:
     from ml_kem_driver import MLKem768
     with MLKem768('/home/ubuntu/ml_kem.bit') as kem:
@@ -113,12 +140,13 @@ class MLKem768:
         self.ip = getattr(self.overlay, ip_name)
 
         # CMA-backed buffers (physical address reachable by the IP's m_axi
-        # via HPC0_DDR_LOW mapping).
-        self.pk = allocate((PK_SIZE,), dtype=np.uint8)
-        self.sk = allocate((SK_SIZE,), dtype=np.uint8)
-        self.ct = allocate((CT_SIZE,), dtype=np.uint8)
-        self.ss = allocate((SS_SIZE,), dtype=np.uint8)
-        self.m  = allocate((M_SIZE,),  dtype=np.uint8)
+        # via HPC0_DDR_LOW mapping). cacheable=False maps the region uncached
+        # so flush/invalidate are unnecessary — see module docstring.
+        self.pk = allocate((PK_SIZE,), dtype=np.uint8, cacheable=False)
+        self.sk = allocate((SK_SIZE,), dtype=np.uint8, cacheable=False)
+        self.ct = allocate((CT_SIZE,), dtype=np.uint8, cacheable=False)
+        self.ss = allocate((SS_SIZE,), dtype=np.uint8, cacheable=False)
+        self.m  = allocate((M_SIZE,),  dtype=np.uint8, cacheable=False)
 
         # Program pointers once. IP latches them until next write, so we
         # don't need to reprogram per-op.
@@ -172,7 +200,10 @@ class MLKem768:
             timeout_s: override default 2.0 s timeout.
 
         Returns:
-            (pk_bytes, sk_bytes, cycles).
+            (pk_view, sk_view, cycles) — pk_view and sk_view are
+            zero-copy memoryviews into self.pk / self.sk. They become
+            stale on the next call that touches those buffers; if you
+            need to keep the data, call `bytes(view)` immediately.
         """
         self._ensure_idle()
         self._write_seed(REG_SEED_D_BASE, seed_d)
@@ -184,9 +215,7 @@ class MLKem768:
             else self.DEFAULT_TIMEOUTS_S['keygen']
         )
 
-        self.pk.invalidate()
-        self.sk.invalidate()
-        return bytes(self.pk), bytes(self.sk), cycles
+        return memoryview(self.pk), memoryview(self.sk), cycles
 
     def batch_keygen(self, seed_d, seed_z, n, timeout_s=None):
         """R-new-D K3 (Method E batched API): N keygens with one trigger.
@@ -212,9 +241,13 @@ class MLKem768:
             raise ValueError("Seeds must be 32 bytes each")
         self._ensure_idle()
 
-        # Allocate combined output buffers.
-        pk_arr = allocate((n * PK_SIZE,), dtype=np.uint8)
-        sk_arr = allocate((n * SK_SIZE,), dtype=np.uint8)
+        # Allocate combined output buffers. Unlike single-op buffers (which
+        # are uncached for zero-flush latency), batched buffers are large
+        # enough (~358 KB at n=100) that the cost of one bulk invalidate
+        # is far less than reading them uncached. So cacheable + 1
+        # invalidate after HW done = fastest readout path.
+        pk_arr = allocate((n * PK_SIZE,), dtype=np.uint8, cacheable=True)
+        sk_arr = allocate((n * SK_SIZE,), dtype=np.uint8, cacheable=True)
 
         try:
             # Reprogram pk/sk pointers for batch buffers. RTL adds the
@@ -231,6 +264,10 @@ class MLKem768:
                 else self.DEFAULT_TIMEOUTS_S['keygen'] * n
             )
 
+            # Cacheable batched buffers: drop stale L1/L2 lines so the
+            # subsequent bytes() reads pick up fresh DDR data written by
+            # the PL master. One bulk call per buffer (~50 µs total)
+            # vs ~300 µs of uncached readout for n=100.
             pk_arr.invalidate()
             sk_arr.invalidate()
             pks_out = bytes(pk_arr)
@@ -252,8 +289,14 @@ class MLKem768:
         """Encaps: (pk, m) → (ct, ss).
 
         Args:
-            pk_bytes: 1184-byte public key.
+            pk_bytes: 1184-byte public key (bytes or memoryview).
             m_bytes: 32-byte randomness.
+
+        Returns:
+            (ct_view, ss_bytes, cycles) — ct_view is a memoryview into
+            self.ct; ss is a 32-byte snapshot (always copied since
+            round-trip flows compare ss_enc to ss_dec after decaps
+            overwrites self.ss).
         """
         if len(pk_bytes) != PK_SIZE:
             raise ValueError(f"pk must be {PK_SIZE} bytes")
@@ -263,8 +306,6 @@ class MLKem768:
         self._ensure_idle()
         self.pk[:] = np.frombuffer(pk_bytes, dtype=np.uint8)
         self.m[:]  = np.frombuffer(m_bytes,  dtype=np.uint8)
-        self.pk.flush()
-        self.m.flush()
 
         self.ip.write(REG_CTRL, CTRL_START_ENCAPS)
         cycles = self._wait_done(
@@ -272,12 +313,14 @@ class MLKem768:
             else self.DEFAULT_TIMEOUTS_S['encaps']
         )
 
-        self.ct.invalidate()
-        self.ss.invalidate()
-        return bytes(self.ct), bytes(self.ss), cycles
+        return memoryview(self.ct), bytes(self.ss), cycles
 
     def decaps(self, sk_bytes, ct_bytes, timeout_s=None):
-        """Decaps: (sk, ct) → ss. Includes implicit rejection path."""
+        """Decaps: (sk, ct) → ss. Includes implicit rejection path.
+
+        Returns:
+            (ss_bytes, cycles) — ss is a 32-byte snapshot (bytes).
+        """
         if len(sk_bytes) != SK_SIZE:
             raise ValueError(f"sk must be {SK_SIZE} bytes")
         if len(ct_bytes) != CT_SIZE:
@@ -286,8 +329,6 @@ class MLKem768:
         self._ensure_idle()
         self.sk[:] = np.frombuffer(sk_bytes, dtype=np.uint8)
         self.ct[:] = np.frombuffer(ct_bytes, dtype=np.uint8)
-        self.sk.flush()
-        self.ct.flush()
 
         self.ip.write(REG_CTRL, CTRL_START_DECAPS)
         cycles = self._wait_done(
@@ -295,7 +336,6 @@ class MLKem768:
             else self.DEFAULT_TIMEOUTS_S['decaps']
         )
 
-        self.ss.invalidate()
         return bytes(self.ss), cycles
 
     # ----- Lifecycle ------------------------------------------------------
@@ -384,9 +424,9 @@ class MLKem768Fast(MLKem768):
     """Drop-in subclass that uses a C busy-poll for `_wait_done`.
 
     Identical API to `MLKem768`. Only the polling loop is replaced —
-    register writes, cache flush/invalidate, and PYNQ buffer mgmt are
-    unchanged. Use this for latency-sensitive workloads or for the
-    A-vs-C software-stack comparison benchmark.
+    register writes and PYNQ buffer mgmt are unchanged. Use this for
+    latency-sensitive workloads or for the A-vs-C software-stack
+    comparison benchmark.
     """
 
     def __init__(self, bitfile, ip_name='ml_kem_top_0'):
@@ -423,15 +463,16 @@ class MLKem768Fast(MLKem768):
 # Method C-full driver — entire per-op flow in C (Level 1).
 #
 # What's in C:    register writes (seeds + start), polling, cycles read.
-# What's in Py:   buffer copy + cache flush()/invalidate() (still PYNQ).
+# What's in Py:   buffer copy only — cache ops removed in Scenario B Opt #1
+#                 since buffers are now uncached (cacheable=False).
 #
 # Theoretical ceiling: ~−25-45% wall vs Method A (frees up the Python
-# overhead of 17 mmio writes + last-poll detect + cycles read). Cache
-# ops + buffer copy still cost ~100-200 µs and dominate the residual.
-# Level 2 (cache via aarch64 DC instructions) would be a future step.
+# overhead of 17 mmio writes + last-poll detect + cycles read). With
+# cache ops removed, residual cost is mostly the buffer copy + ctypes
+# call overhead.
 # ====================================================================
 class MLKem768FullC(MLKem768Fast):
-    """Per-op execution path is one C call. Cache mgmt stays in Python."""
+    """Per-op execution path is one C call. Buffers are uncached CMA."""
 
     def keygen(self, seed_d, seed_z, timeout_s=None):
         if len(seed_d) != 32 or len(seed_z) != 32:
@@ -455,9 +496,7 @@ class MLKem768FullC(MLKem768Fast):
         )
         self._raise_on_run_error(cycles, timeout_s, 'keygen')
 
-        self.pk.invalidate()
-        self.sk.invalidate()
-        return bytes(self.pk), bytes(self.sk), cycles & 0xFFFFFFFF
+        return memoryview(self.pk), memoryview(self.sk), cycles & 0xFFFFFFFF
 
     def encaps(self, pk_bytes, m_bytes, timeout_s=None):
         if len(pk_bytes) != PK_SIZE:
@@ -468,8 +507,6 @@ class MLKem768FullC(MLKem768Fast):
 
         self.pk[:] = np.frombuffer(pk_bytes, dtype=np.uint8)
         self.m[:]  = np.frombuffer(m_bytes,  dtype=np.uint8)
-        self.pk.flush()
-        self.m.flush()
 
         timeout_us = int(
             (timeout_s if timeout_s is not None
@@ -478,9 +515,7 @@ class MLKem768FullC(MLKem768Fast):
         cycles = self._fast_lib.mlkem_encaps_run(self._reg_ptr, timeout_us)
         self._raise_on_run_error(cycles, timeout_s, 'encaps')
 
-        self.ct.invalidate()
-        self.ss.invalidate()
-        return bytes(self.ct), bytes(self.ss), cycles & 0xFFFFFFFF
+        return memoryview(self.ct), bytes(self.ss), cycles & 0xFFFFFFFF
 
     def decaps(self, sk_bytes, ct_bytes, timeout_s=None):
         if len(sk_bytes) != SK_SIZE:
@@ -491,8 +526,6 @@ class MLKem768FullC(MLKem768Fast):
 
         self.sk[:] = np.frombuffer(sk_bytes, dtype=np.uint8)
         self.ct[:] = np.frombuffer(ct_bytes, dtype=np.uint8)
-        self.sk.flush()
-        self.ct.flush()
 
         timeout_us = int(
             (timeout_s if timeout_s is not None
@@ -501,7 +534,6 @@ class MLKem768FullC(MLKem768Fast):
         cycles = self._fast_lib.mlkem_decaps_run(self._reg_ptr, timeout_us)
         self._raise_on_run_error(cycles, timeout_s, 'decaps')
 
-        self.ss.invalidate()
         return bytes(self.ss), cycles & 0xFFFFFFFF
 
     def _raise_on_run_error(self, code, timeout_s, op_name):

@@ -4,8 +4,9 @@
 //  - Method C (poll-only):  mlkem_wait_done / mlkem_wait_done_iters
 //  - Method C-full:         mlkem_{keygen,encaps,decaps}_run — entire
 //                           per-op flow (seeds + start + poll + cycles
-//                           read) is one C call. Cache flush/invalidate
-//                           remain on the Python side (PYNQ allocate()).
+//                           read) is one C call. Buffers are uncached
+//                           CMA (cacheable=False) so no flush/invalidate
+//                           is needed — see ml_kem_driver.py docstring.
 //
 // Build (on KR260):  make
 // Build (manual):    gcc -O2 -Wall -shared -fPIC ml_kem_fast_poll.c -o libmlkemfast.so
@@ -62,9 +63,9 @@ int64_t mlkem_wait_done_iters(volatile uint32_t *regs, uint32_t max_iters) {
 // ---- Method C-full: per-op native driver ----------------------------------
 // These functions run an entire ML-KEM operation in native C: write the
 // seeds (KeyGen), pulse CTRL.start with op_sel, busy-poll STATUS, read
-// REG_CYCLES. Caller (Python) is still responsible for flushing input
-// buffers and invalidating output buffers via pynq.allocate().flush() /
-// .invalidate() before / after the call.
+// REG_CYCLES. Buffers are uncached CMA on the Python side (Scenario B
+// Opt #1) so no cache maintenance is required — CPU stores hit DDR
+// directly and the PL master reads them via HPC0_FPD.
 //
 // Returns same convention as mlkem_wait_done:
 //   >= 0 : cycle count (REG_CYCLES)
@@ -91,13 +92,13 @@ int64_t mlkem_keygen_run(volatile uint32_t *regs,
     return mlkem_wait_done(regs, timeout_us);
 }
 
-// Encaps: caller has placed pk + m in DDR + flushed cache. We just trigger.
+// Encaps: caller has placed pk + m in DDR (uncached CMA). We just trigger.
 int64_t mlkem_encaps_run(volatile uint32_t *regs, uint32_t timeout_us) {
     regs[REG_CTRL_WORD] = CTRL_START_ENCAPS;
     return mlkem_wait_done(regs, timeout_us);
 }
 
-// Decaps: caller has placed sk + ct in DDR + flushed cache. We trigger.
+// Decaps: caller has placed sk + ct in DDR (uncached CMA). We trigger.
 int64_t mlkem_decaps_run(volatile uint32_t *regs, uint32_t timeout_us) {
     regs[REG_CTRL_WORD] = CTRL_START_DECAPS;
     return mlkem_wait_done(regs, timeout_us);
